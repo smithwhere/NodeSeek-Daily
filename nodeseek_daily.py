@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 
 import requests
 from curl_cffi import requests as browser_requests
@@ -77,8 +78,9 @@ def dump_cookies(session):
             for item in session.cookies.jar if item.domain.endswith("nodeseek.com")]
 
 
-def cookie_session(cookies):
+def cookie_session(cookies, headers=None):
     session = browser_requests.Session(impersonate="chrome")
+    session.headers.update(headers or {"x-integrity-token": uuid.uuid4().hex})
     for item in cookies:
         if item.get("expires") and item["expires"] <= time.time():
             continue
@@ -128,13 +130,19 @@ def login(session):
     session.get(LOGIN_URL, timeout=30)
     token = solve_turnstile()
     response = session.post(BASE + "/api/account/signIn", json={
-        "username": username, "password": password,
-        "token": token, "source": "turnstile"
-    }, headers={"Origin": BASE, "Referer": LOGIN_URL}, timeout=30)
+        "username": username, "password": password
+    }, headers={"Origin": BASE, "Referer": LOGIN_URL,
+                "x-captcha-token": token, "x-captcha-source": "turnstile"}, timeout=30)
     if response.status_code != 200:
         raise RuntimeError("登录 HTTP 状态：" + str(response.status_code))
-    if not response.json().get("success"):
+    result = response.json()
+    if not result.get("success"):
         raise RuntimeError("NodeSeek 登录失败，请检查账号密码或验证服务")
+    if result.get("need2FA"):
+        raise RuntimeError("账号需要 2FA 验证，自动登录无法继续")
+    for header in ("x-security-token", "x-csrf-token"):
+        if response.headers.get(header):
+            session.headers[header] = response.headers[header]
     print("NodeSeek 登录成功")
 
 
@@ -261,7 +269,7 @@ def main():
                 cookies.append({"name": name, "value": value,
                                 "domain": ".nodeseek.com", "path": "/"})
         state["cookies"] = cookies
-    session = cookie_session(state.get("cookies", []))
+    session = cookie_session(state.get("cookies", []), state.get("headers"))
     driver = None
     try:
         valid = bool(state.get("cookies")) and attendance(session)
@@ -273,11 +281,13 @@ def main():
             state["cookies"] = dump_cookies(session)
             if not state["cookies"]:
                 raise RuntimeError("登录未返回 Cookie")
+            state["headers"] = {k: v for k, v in session.headers.items()
+                                if k in ("x-security-token", "x-csrf-token", "x-integrity-token")}
             store.save(state)
             # Read back persisted state and create a fresh session using only its Cookie.
             state = store.load()
             session.close()
-            session = cookie_session(state["cookies"])
+            session = cookie_session(state["cookies"], state.get("headers"))
             print("新 Cookie 已加密写回并重新读取，使用 Cookie 会话继续")
             if not attendance(session):
                 raise RuntimeError("写回后的 Cookie 无效")

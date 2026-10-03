@@ -69,9 +69,9 @@ class Tests(unittest.TestCase):
             {"cookies": [{"value": "new"}]},
         ]
         store.save.side_effect = lambda state: events.append("write")
-        def session(cookies):
+        def session(cookies, headers=None):
             events.append("cookie:" + (cookies[0]["value"] if cookies else "empty"))
-            return Mock()
+            return Mock(headers={})
         def login(_):
             events.append("login")
         with patch.object(app, "StateStore", return_value=store), \

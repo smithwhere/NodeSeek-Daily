@@ -1,43 +1,52 @@
-name: NodeSeek 自动签到评论加鸡腿
+name: NodeSeek 自动签到和随机评论
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
   schedule:
-    - cron: '00 16 * * *'  # UTC 16:00，即北京时间 00:00
+    - cron: '17 16 * * *' # 北京时间每天 00:17
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nodeseek-daily
+  cancel-in-progress: false
 
 jobs:
-  run-nodeseek-daily:
+  daily:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 15
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-      
-      - name: Set up Python
-        uses: actions/setup-python@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.11.8'
-
-      - name: Install Chrome and Xvfb
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y chromium-browser chromium-chromedriver xvfb
-          echo "Chrome version:"
-          chromium-browser --version
-          echo "ChromeDriver version:"
-          chromedriver --version
-
-      - name: Install Python dependencies
+          python-version: '3.11'
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
-      - name: Run NodeSeek script
+      - name: Validate cookie persistence
+        run: python -m unittest -v
+      - name: Check configuration
         env:
-          NS_COOKIE: ${{ secrets.NS_COOKIE }}
-          NS_RANDOM: ${{ secrets.NS_RANDOM }}
-          HEADLESS: "true"
+          NS_USERNAME: ${{ secrets.NS_USERNAME }}
+          NS_PASSWORD: ${{ secrets.NS_PASSWORD }}
+          YESCAPTCHA_KEY: ${{ secrets.YESCAPTCHA_KEY }}
+          COOKIE_ENCRYPTION_KEY: ${{ secrets.COOKIE_ENCRYPTION_KEY }}
         run: |
-          python nodeseek_daily.py
+          test -n "$NS_USERNAME" && test -n "$NS_PASSWORD" && test -n "$YESCAPTCHA_KEY" && test -n "$COOKIE_ENCRYPTION_KEY"
+      - name: Sign in and post one random comment
+        env:
+          NS_USERNAME: ${{ secrets.NS_USERNAME }}
+          NS_PASSWORD: ${{ secrets.NS_PASSWORD }}
+          YESCAPTCHA_KEY: ${{ secrets.YESCAPTCHA_KEY }}
+          COOKIE_ENCRYPTION_KEY: ${{ secrets.COOKIE_ENCRYPTION_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          NS_COOKIE: ${{ secrets.NS_COOKIE }}
+          NS_COMMENT_TEXTS: ${{ vars.NS_COMMENT_TEXTS }}
+          NS_RANDOM: "false"
+          NS_COMMENT: "true"
+          HEADLESS: "true"
+          CHROME_BINARY: /usr/bin/google-chrome
+          PYTHONUNBUFFERED: "1"
+        run: python nodeseek_daily.py

@@ -1,41 +1,38 @@
-# NodeSeek 自动签到评论加鸡腿脚本
+# NodeSeek 每日签到与随机评论
 
-这是一个用于 NodeSeek 论坛的自动化脚本，包含签到、评论和加鸡腿功能。使用 Selenium 和 undetected-chromedriver 实现自动化操作。
+每天北京时间 00:17 由 GitHub Actions 自动执行，也可在 Actions 中手动 Run workflow。
+先固定领取 5 鸡腿，再在交易区随机选择一个可评论帖子，发布一条随机祝福。
+不再批量评论 20 个帖子，不额外给帖子加鸡腿。
 
-强烈建议修改随机词。否则容易被举报被禁言。有能力的可以fork后自己定义改。
+## Secrets
 
-## 功能特点
+在 Settings → Secrets and variables → Actions 保存：
+- `NS_USERNAME`：NodeSeek 用户名
+- `NS_PASSWORD`：NodeSeek 密码
+- `YESCAPTCHA_KEY`：YesCaptcha API 密钥
+- `COOKIE_ENCRYPTION_KEY`：专用 Fernet 加密密钥，不应删除或随意更换
+- `NS_COOKIE`：可选，有效 Cookie 优先使用；失效时重新登录
 
-- 自动签到（点击签到图标）
-- 自动点击"试试手气"或"鸡腿 x 5"按钮（可配置）
-- 随机选择帖子进行评论
-- 自动给帖子加鸡腿（7天内的帖子）
-- 随机评论内容（"bd"、"绑定"、"帮顶"）
-- 支持 GitHub Actions 自动运行
-- 支持无头模式（可配置）
+首次运行没有 Cookie 时使用账号密码登录。之后优先读取 `.state/nodeseek.enc` 中的加密 Cookie，失效后才重新登录。
+新 Cookie 用专用 Secret 加密后立即写回仓库，并重新读取、建立 Cookie 会话后继续签到。
+写回使用工作流的 `GITHUB_TOKEN`（仅需 contents: write），无需个人访问令牌。
+当天已评论或提交状态不明时不会重复发送。
 
-## 环境变量配置
+用户名密码登录通过 YesCaptcha Turnstile 服务，可能消耗服务余额。
+密码、API 密钥和 Cookie 不写入代码、日志或公开文件。
 
-- `NS_COOKIE`: NodeSeek 的 Cookie（必需）
-- `NS_RANDOM`: 是否随机选择奖励，true/false（可选）
-- `HEADLESS`: 是否使用无头模式，true/false（可选，默认 true）
+## 评论设置
 
-## 本地运行
+默认每次运行最多评论一次，跳过置顶、只读及标题标有已出/已收的帖子。
+默认随机文字为：帮顶一下，祝早日成交；支持一下，祝交易顺利；帮顶，祝早日找到合适的买家或卖家。
+可用仓库变量 `NS_COMMENT_TEXTS` 自定义，例如：
+```json
+["帮顶一下，祝早日成交。", "支持一下，祝交易顺利。"]
+```
+评论应遵守论坛版规。手动重复运行可能产生额外评论。
+如要仅签到，将工作流的 `NS_COMMENT` 改为 `"false"`。
 
-1. 克隆仓库
-2. 安装依赖：`pip install -r requirements.txt`
-3. 设置环境变量（可使用 .env 文件）
-4. 运行脚本：`python nodeseek_daily.py`
+## 验证
 
-## GitHub Actions 自动运行
-
-1. Fork 本仓库
-2. 在仓库的 Settings -> Secrets 中添加 `NS_COOKIE`
-3. 可选：添加 `NS_RANDOM` 设置是否随机选择奖励
-4. Actions 会在每天 UTC 16:00（北京时间 00:00）自动运行
-
-## 注意事项
-
-- 请确保 Cookie 有效且具有足够的权限
-- 评论内容较为简单，建议根据需要修改 `randomInputStr` 列表
-- 加鸡腿功能仅对 7 天内的帖子有效
+工作流只有在签到和评论均确认成功时显示绿色；提交评论后状态不明时不会再次发送。
+GitHub 定时任务可能延迟，公开仓库长期无活动时平台可能暂停定时执行。

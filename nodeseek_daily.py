@@ -3,6 +3,7 @@
 Copyright (c) 2024 Hosea. Licensed under the MIT License.
 """
 import base64
+import hashlib
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -28,6 +29,10 @@ LOGIN_URL = BASE + "/signIn.html"
 SITEKEY = "0x4AAAAAAAaNy7leGjewpVyR"
 DEFAULT_COMMENTS = ["帮顶一下，祝早日成交。", "支持一下，祝交易顺利。", "帮顶，祝早日找到合适的买家或卖家。"]
 
+
+
+class LoginVerificationRequired(RuntimeError):
+    pass
 
 
 class StateStore:
@@ -138,7 +143,7 @@ def login(session):
         raise RuntimeError("NodeSeek 登录失败，请检查账号密码或验证服务")
     redirect = str(result.get("redirect", ""))
     if redirect.startswith(("/emailSignIn", "/smsSignIn")):
-        raise RuntimeError("NodeSeek 要求邮箱或短信验证新设备，请先提供已登录的 NS_COOKIE")
+        raise LoginVerificationRequired("NodeSeek 要求邮箱或短信验证新设备，请先提供已登录的 NS_COOKIE")
     if result.get("need2FA"):
         raise RuntimeError("账号需要 2FA 验证，自动登录无法继续")
     for header in ("x-security-token", "x-csrf-token"):
@@ -156,11 +161,11 @@ def attendance(session):
                             timeout=30)
     if response.status_code == 401:
         return False
-    if response.status_code != 200:
+    if response.status_code not in (200, 400):
         raise RuntimeError("签到 HTTP 状态：" + str(response.status_code))
     data = response.json()
     message = str(data.get("message", ""))
-    if data.get("success") or "已完成签到" in message or "已经签到" in message:
+    if data.get("success") or any(text in message for text in ("已完成签到", "已经签到", "今天已签到", "请勿重复操作")):
         print("签到成功或今天已签到：" + message)
         return True
     if data.get("status") in (401, 404) or "登录" in message or "登陆" in message:
@@ -193,6 +198,9 @@ def setup_driver(session, page="/categories/trade"):
                 driver.add_cookie({"name": item.name, "value": item.value,
                                    "domain": item.domain, "path": item.path or "/",
                                    "secure": item.secure})
+        for header, storage in (("x-security-token", "security_token"), ("x-csrf-token", "csrf_token")):
+            if session.headers.get(header):
+                driver.execute_script("localStorage.setItem(arguments[0],arguments[1]);", storage, session.headers[header])
         driver.get(BASE + page)
         return driver
     except Exception:
@@ -265,7 +273,10 @@ def main():
     store = StateStore()
     state = store.load()
     # An optional manually supplied Cookie seeds the initial encrypted state.
-    if not state.get("cookies") and os.getenv("NS_COOKIE", "").strip():
+    seed_cookie = os.getenv("NS_COOKIE", "").strip()
+    seed_hash = hashlib.sha256(seed_cookie.encode()).hexdigest() if seed_cookie else None
+    seed_changed = bool(seed_cookie and state.get("seed_hash") != seed_hash)
+    if seed_changed:
         cookies = []
         for part in os.environ["NS_COOKIE"].split(";"):
             if "=" in part:
@@ -273,15 +284,25 @@ def main():
                 cookies.append({"name": name, "value": value,
                                 "domain": ".nodeseek.com", "path": "/"})
         state["cookies"] = cookies
+        state["seed_hash"] = seed_hash
+        state.pop("needs_device_verification", None)
     session = cookie_session(state.get("cookies", []), state.get("headers"))
     driver = None
     try:
         valid = bool(state.get("cookies")) and attendance(session)
         if not valid:
+            if state.get("needs_device_verification"):
+                raise RuntimeError("尚未完成新设备验证，请更新 NS_COOKIE；已跳过付费验证")
             print("没有有效 Cookie，使用账号密码和 YesCaptcha 登录")
             session.close()
             session = cookie_session([], state.get("headers"))
-            login(session)
+            try:
+                login(session)
+            except LoginVerificationRequired:
+                state["needs_device_verification"] = True
+                store.save(state)
+                raise
+            state.pop("needs_device_verification", None)
             state["cookies"] = dump_cookies(session)
             if not state["cookies"]:
                 raise RuntimeError("登录未返回 Cookie")
@@ -295,7 +316,7 @@ def main():
             print("新 Cookie 已加密写回并重新读取，使用 Cookie 会话继续")
             if not attendance(session):
                 raise RuntimeError("写回后的 Cookie 无效")
-        elif not store.sha:
+        elif not store.sha or seed_changed:
             store.save(state)
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
         if env_bool("NS_COMMENT", True):

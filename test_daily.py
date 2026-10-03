@@ -128,6 +128,45 @@ class Tests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "验证新设备"):
                 app.login(session)
 
+    def test_known_device_verification_never_retries_paid_login(self):
+        store = Mock(sha="existing")
+        store.load.return_value = {"needs_device_verification": True}
+        with patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=Mock()), \
+             patch.object(app, "login") as login:
+            with self.assertRaisesRegex(RuntimeError, "已跳过付费验证"):
+                app.main()
+        login.assert_not_called()
+
+    def test_verification_requirement_is_persisted(self):
+        store = Mock(sha=None)
+        store.load.return_value = {}
+        with patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=Mock()), \
+             patch.object(app, "login", side_effect=app.LoginVerificationRequired("verify")):
+            with self.assertRaises(app.LoginVerificationRequired):
+                app.main()
+        self.assertTrue(store.save.call_args.args[0]["needs_device_verification"])
+
+    def test_new_cookie_clears_block_and_is_saved(self):
+        store = Mock(sha="existing")
+        store.load.return_value = {"needs_device_verification": True}
+        with patch.dict(os.environ, {"NS_COOKIE": "session=new-session"}), \
+             patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=Mock()), \
+             patch.object(app, "attendance", return_value=True), \
+             patch.object(app, "login") as login:
+            app.main()
+        saved = store.save.call_args.args[0]
+        self.assertNotIn("needs_device_verification", saved)
+        self.assertEqual(saved["cookies"][0]["value"], "new-session")
+        login.assert_not_called()
+
+    def test_already_signed_in_http_400_is_success(self):
+        response = Mock(status_code=400)
+        response.json.return_value = {"success": False, "message": "今天已签到，请勿重复操作"}
+        self.assertTrue(app.attendance(Mock(post=Mock(return_value=response))))
+
 
 if __name__ == "__main__":
     unittest.main()

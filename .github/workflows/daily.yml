@@ -3,7 +3,7 @@ name: NodeSeek 自动签到和随机评论
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 16 * * *' # 北京时间每天 00:17
+    - cron: '5 16 * * *' # 北京时间每天 00:05
 
 permissions:
   contents: write

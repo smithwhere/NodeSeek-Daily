@@ -1,6 +1,6 @@
 # NodeSeek 每日签到与随机评论
 
-每天北京时间 00:17 由 GitHub Actions 自动执行，也可在 Actions 中手动 Run workflow。
+每天北京时间 00:05 由 GitHub Actions 自动执行，也可在 Actions 中手动 Run workflow。
 先固定领取 5 鸡腿，再在交易区随机选择一个可评论帖子，发布一条随机祝福。
 不再批量评论 20 个帖子，不额外给帖子加鸡腿。
 

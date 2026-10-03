@@ -44,6 +44,23 @@ class Tests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "密文验证失败"):
                 store.load()
 
+    def test_saved_state_has_no_expiry(self):
+        store = app.StateStore()
+        state = {"cookies": [{"name": "session", "value": "saved"}]}
+        encrypted = store.cipher.encrypt_at_time(json.dumps(state).encode(), 946684800)
+        response = Mock(status_code=200)
+        response.json.return_value = {"sha": "old", "content": base64.b64encode(encrypted).decode()}
+        with patch.object(app.requests, "get", return_value=response):
+            self.assertEqual(store.load(), state)
+
+    def test_cookie_metadata_expiry_is_not_enforced(self):
+        session = app.cookie_session([{"name": "session", "value": "saved", "domain": ".nodeseek.com", "path": "/", "expires": 1}])
+        try:
+            self.assertEqual(session.cookies.get("session"), "saved")
+            self.assertNotIn("expires", app.dump_cookies(session)[0])
+        finally:
+            session.close()
+
     def test_failed_write_is_fatal(self):
         store = app.StateStore()
         with patch.object(app.requests, "put", return_value=Mock(status_code=403)):
@@ -77,8 +94,7 @@ class Tests(unittest.TestCase):
         with patch.object(app, "StateStore", return_value=store), \
              patch.object(app, "cookie_session", side_effect=session), \
              patch.object(app, "attendance", side_effect=[False, True]), \
-             patch.object(app, "browser_login_cookie", side_effect=lambda s, d: login(s)), \
-             patch.object(app, "setup_driver", return_value=Mock()), \
+             patch.object(app, "login", side_effect=login), \
              patch.object(app, "dump_cookies", return_value=[{"value": "new"}]):
             app.main()
         self.assertEqual(events, ["cookie:old", "cookie:empty", "login", "write", "cookie:new"])
@@ -102,8 +118,16 @@ class Tests(unittest.TestCase):
             self.assertEqual(app.solve_turnstile(), "ok")
         self.assertEqual(request.call_args_list[2].kwargs["json"]["taskId"], "task-1")
 
+    def test_new_device_verification_is_not_login_success(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {"success": True, "redirect": "/emailSignIn.html"}
+        session = Mock()
+        session.post.return_value = response
+        with patch.dict(os.environ, {"NS_USERNAME": "test", "NS_PASSWORD": "test"}), \
+             patch.object(app, "solve_turnstile", return_value="test-token"):
+            with self.assertRaisesRegex(RuntimeError, "验证新设备"):
+                app.login(session)
+
 
 if __name__ == "__main__":
     unittest.main()
-
-

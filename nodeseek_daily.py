@@ -136,12 +136,17 @@ def login(session):
     result = response.json()
     if not result.get("success"):
         raise RuntimeError("NodeSeek 登录失败，请检查账号密码或验证服务")
+    redirect = str(result.get("redirect", ""))
+    if redirect.startswith(("/emailSignIn", "/smsSignIn")):
+        raise RuntimeError("NodeSeek 要求邮箱或短信验证新设备，请先提供已登录的 NS_COOKIE")
     if result.get("need2FA"):
         raise RuntimeError("账号需要 2FA 验证，自动登录无法继续")
     for header in ("x-security-token", "x-csrf-token"):
         if response.headers.get(header):
             session.headers[header] = response.headers[header]
-    print("NodeSeek 登录成功")
+    if not dump_cookies(session):
+        raise RuntimeError("登录响应未返回会话 Cookie，不能视为登录成功")
+    print("NodeSeek 登录成功，已取得 Cookie")
 
 
 def attendance(session):
@@ -194,52 +199,6 @@ def setup_driver(session, page="/categories/trade"):
         driver.quit()
         raise
 
-
-
-def browser_login_cookie(session, driver):
-    # Let the site's own client create its session Cookie after API authentication.
-    page = session.get(LOGIN_URL, timeout=30).text
-    loader = re.search(r'src="(/assets/loader-[^"]+\.js)"', page)
-    if not loader:
-        raise RuntimeError("无法定位 NodeSeek 登录客户端")
-    script = session.get(BASE + loader.group(1), timeout=30).text
-    module = re.search(r'assets/tokens-[^"]+\.js', script)
-    if not module:
-        raise RuntimeError("无法定位 NodeSeek 会话模块")
-    print("浏览器页面：" + driver.title + " 路径：" + driver.current_url.split("?")[0])
-    public_script = session.get(BASE + "/static/js/msc-script.3732897e6a1c28f78f8687b1facd39b5.js", timeout=30)
-    if public_script.status_code == 200:
-        for match in re.finditer(r"(.{0,140}(?:x-security-token|security_token|csrf_token|document\\.cookie|/api/account)[^;]{0,250})", public_script.text):
-            print("公开客户端片段：" + match.group(1))
-    print("公开客户端状态：" + str(public_script.status_code))
-    print("公开客户端源码：" + public_script.text[:20000])
-    sw = session.get(BASE + "/sw.js", timeout=30)
-    print("公开会话脚本：" + str(sw.status_code) + " " + sw.text[:45000])
-    fingerprint = driver.execute_async_script(
-        "const done=arguments[arguments.length-1];"
-        "import(arguments[0]).then(m=>m.a()).then(done).catch(e=>done({error:e.name,message:e.message}));",
-        BASE + "/" + module.group(0))
-    if isinstance(fingerprint, dict):
-        print("客户端模块错误：" + str(fingerprint))
-        fingerprint = None
-    if not fingerprint:
-        raise RuntimeError("浏览器会话初始化失败")
-    session.headers["x-integrity-token"] = fingerprint
-    login(session)
-    for header, storage in (("x-security-token", "security_token"), ("x-csrf-token", "csrf_token")):
-        if session.headers.get(header):
-            driver.execute_script("localStorage.setItem(arguments[0],arguments[1]);",
-                                  storage, session.headers[header])
-    driver.get(BASE + "/categories/trade")
-    username = os.environ["NS_USERNAME"]
-    WebDriverWait(driver, 45).until(lambda d: any(
-        a.text == username for a in d.find_elements(By.CSS_SELECTOR, ".nsk-right-panel-container a")))
-    # Cookie creation may trigger an automatic reload in the site's own bootstrap.
-    for item in driver.get_cookies():
-        session.cookies.set(item["name"], item["value"],
-                            domain=item["domain"], path=item.get("path", "/"))
-    if not dump_cookies(session):
-        raise RuntimeError("浏览器登录后仍未取得 Cookie")
 
 
 def random_comment(driver, store, state, today):
@@ -321,9 +280,8 @@ def main():
         if not valid:
             print("没有有效 Cookie，使用账号密码和 YesCaptcha 登录")
             session.close()
-            session = cookie_session([])
-            driver = setup_driver(session, "/signIn.html")
-            browser_login_cookie(session, driver)
+            session = cookie_session([], state.get("headers"))
+            login(session)
             state["cookies"] = dump_cookies(session)
             if not state["cookies"]:
                 raise RuntimeError("登录未返回 Cookie")

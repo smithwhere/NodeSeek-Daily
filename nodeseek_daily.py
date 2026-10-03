@@ -212,6 +212,9 @@ def browser_login_cookie(session, driver):
         for match in re.finditer(r"(.{0,140}(?:x-security-token|security_token|csrf_token|document\\.cookie|/api/account)[^;]{0,250})", public_script.text):
             print("公开客户端片段：" + match.group(1))
     print("公开客户端状态：" + str(public_script.status_code))
+    print("公开客户端源码：" + public_script.text[:20000])
+    sw = session.get(BASE + "/sw.js", timeout=30)
+    print("公开会话脚本：" + str(sw.status_code) + " " + sw.text[:45000])
     fingerprint = driver.execute_async_script(
         "const done=arguments[arguments.length-1];"
         "import(arguments[0]).then(m=>m.a()).then(done).catch(e=>done({error:e.name,message:e.message}));",

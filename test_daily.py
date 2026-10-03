@@ -163,9 +163,24 @@ class Tests(unittest.TestCase):
         login.assert_not_called()
 
     def test_already_signed_in_http_400_is_success(self):
-        response = Mock(status_code=400)
-        response.json.return_value = {"success": False, "message": "今天已签到，请勿重复操作"}
-        self.assertTrue(app.attendance(Mock(post=Mock(return_value=response))))
+        for status in (400, 500):
+            with self.subTest(status=status):
+                response = Mock(status_code=status)
+                response.json.return_value = {"success": False, "message": "今天已完成签到，请勿重复操作"}
+                self.assertTrue(app.attendance(Mock(post=Mock(return_value=response))))
+
+    def test_pending_comment_is_not_submitted_again(self):
+        store = Mock(sha="existing")
+        today = app.datetime.now(app.ZoneInfo("Asia/Shanghai")).date().isoformat()
+        store.load.return_value = {"cookies": [{"value": "saved"}], "comment_pending_date": today}
+        with patch.dict(os.environ, {"NS_COMMENT": "true"}), \
+             patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=Mock()), \
+             patch.object(app, "attendance", return_value=True), \
+             patch.object(app, "random_comment") as post:
+            with self.assertRaisesRegex(RuntimeError, "避免重复发送"):
+                app.main()
+        post.assert_not_called()
 
 
 if __name__ == "__main__":

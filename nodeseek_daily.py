@@ -11,18 +11,15 @@ from cryptography.fernet import Fernet
 import os
 import random
 import re
-import subprocess
 import sys
 import time
 import uuid
 
 import requests
 from curl_cffi import requests as browser_requests
-import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from bs4 import BeautifulSoup
+from urllib.parse import urljoin
+import secrets
 
 BASE = "https://www.nodeseek.com"
 LOGIN_URL = BASE + "/signIn.html"
@@ -85,7 +82,7 @@ def dump_cookies(session):
 
 def cookie_session(cookies, headers=None):
     session = browser_requests.Session(impersonate="chrome")
-    session.headers.update(headers or {"x-integrity-token": uuid.uuid4().hex})
+    session.headers.update(headers or {})
     for item in cookies:
         session.cookies.set(item["name"], item["value"],
                             domain=item["domain"], path=item.get("path", "/"))
@@ -130,6 +127,7 @@ def login(session):
     password = os.environ.get("NS_PASSWORD", "")
     if not username or not password:
         raise RuntimeError("未配置 NS_USERNAME / NS_PASSWORD")
+    session.headers.setdefault("x-integrity-token", uuid.uuid4().hex)
     session.get(LOGIN_URL, timeout=30)
     token = solve_turnstile()
     response = session.post(BASE + "/api/account/signIn", json={
@@ -161,11 +159,14 @@ def attendance(session):
                             timeout=30)
     if response.status_code == 401:
         return False
-    if response.status_code not in (200, 400):
+    if response.status_code not in (200, 400, 500):
         raise RuntimeError("签到 HTTP 状态：" + str(response.status_code))
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError:
+        raise RuntimeError("签到响应不是 JSON，HTTP " + str(response.status_code))
     message = str(data.get("message", ""))
-    if data.get("success") or any(text in message for text in ("已完成签到", "已经签到", "今天已签到", "请勿重复操作")):
+    if (response.status_code == 200 and data.get("success")) or any(text in message for text in ("已完成签到", "已经签到", "今天已签到", "请勿重复操作")):
         print("签到成功或今天已签到：" + message)
         return True
     if data.get("status") in (401, 404) or "登录" in message or "登陆" in message:
@@ -174,98 +175,71 @@ def attendance(session):
     raise RuntimeError("签到失败（响应状态：" + str(data.get("status", "unknown")) + "）")
 
 
-def setup_driver(session, page="/categories/trade"):
-    options = uc.ChromeOptions()
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    if env_bool("HEADLESS", True):
-        options.add_argument("--headless=new")
-    chrome = os.getenv("CHROME_BINARY", "/usr/bin/google-chrome")
-    kwargs = {}
-    if os.path.exists(chrome):
-        options.binary_location = chrome
-        version = subprocess.check_output([chrome, "--version"], text=True)
-        match = re.search(r"(\d+)\.", version)
-        if match:
-            kwargs["version_main"] = int(match.group(1))
-    driver = uc.Chrome(options=options, **kwargs)
-    driver.set_page_load_timeout(60)
-    try:
-        driver.get(BASE)
-        for item in session.cookies.jar:
-            if item.domain.endswith("nodeseek.com"):
-                driver.add_cookie({"name": item.name, "value": item.value,
-                                   "domain": item.domain, "path": item.path or "/",
-                                   "secure": item.secure})
-        for header, storage in (("x-security-token", "security_token"), ("x-csrf-token", "csrf_token")):
-            if session.headers.get(header):
-                driver.execute_script("localStorage.setItem(arguments[0],arguments[1]);", storage, session.headers[header])
-        driver.get(BASE + page)
-        return driver
-    except Exception:
-        driver.quit()
-        raise
-
-
-
-def random_comment(driver, store, state, today):
+def random_comment(session, store, state, today):
     raw = os.getenv("NS_COMMENT_TEXTS", "")
     texts = json.loads(raw) if raw else DEFAULT_COMMENTS
     if not isinstance(texts, list) or not texts or any(
             not isinstance(x, str) or not x.strip() for x in texts):
         raise RuntimeError("NS_COMMENT_TEXTS 必须是非空字符串的 JSON 数组")
-    wait = WebDriverWait(driver, 30)
-    posts = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".post-list-item")))
+    response = session.get(BASE + "/categories/trade", timeout=30)
+    if response.status_code != 200:
+        raise RuntimeError("交易列表读取失败，HTTP " + str(response.status_code))
+    soup = BeautifulSoup(response.text, "html.parser")
     urls = []
-    for post in posts:
-        if post.find_elements(By.CSS_SELECTOR, ".pined") or "只读" in post.text:
+    for post in soup.select(".post-list-item"):
+        if post.select_one(".pined") or "只读" in post.get_text():
             continue
-        link = post.find_element(By.CSS_SELECTOR, ".post-title a")
-        if any(word in link.text for word in ["已出", "已收", "不出了", "没有了"]):
+        link = post.select_one(".post-title a")
+        if not link or any(word in link.get_text() for word in ["已出", "已收", "不出了", "没有了"]):
             continue
-        url = link.get_attribute("href")
-        if url and url.startswith(BASE + "/post-"):
+        url = urljoin(BASE, link.get("href", ""))
+        if re.fullmatch(re.escape(BASE) + r"/post-\d+-\d+", url):
             urls.append(url)
     random.shuffle(urls)
+    username = os.environ.get("NS_USERNAME", "")
     for url in urls[:5]:
-        driver.get(url)
-        # Skip posts without an editor, or threads already showing our comments.
-        username = os.environ.get("NS_USERNAME", "")
-        if username and any(el.text == username for el in
-                            driver.find_elements(By.CSS_SELECTOR, ".content-item .author-name")):
+        response = session.get(url, timeout=30)
+        if response.status_code != 200:
             continue
-        try:
-            editor = WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".CodeMirror textarea")))
-        except Exception:
+        soup = BeautifulSoup(response.text, "html.parser")
+        if not soup.select_one("#editor"):
             continue
-        text = random.choice(texts)
-        # CodeMirror's textarea accepts native keystrokes.
-        driver.find_element(By.CSS_SELECTOR, ".CodeMirror").click()
-        editor.send_keys(Keys.CONTROL, "a")
-        editor.send_keys(text)
-        button = wait.until(EC.element_to_be_clickable(
-            (By.XPATH, "//button[contains(., '发布评论')]")))
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", button)
-        old_url = driver.current_url
-        old_count = len(driver.find_elements(By.CSS_SELECTOR, ".content-item"))
+        if username and any(a.get_text(strip=True) == username for a in
+                            soup.select(".content-item .author-name")):
+            continue
+        # Use the same endpoint and fields as NodeSeek's own comment editor.
+        post_id = int(re.search(r"/post-(\d+)-", url).group(1))
+        comment = random.choice(texts)
         state["comment_pending_date"] = today
         store.save(state)
-        button.click()
-        # Do not submit again if delivery is uncertain.
-        wait.until(lambda d: d.current_url != old_url or
-                   len(d.find_elements(By.CSS_SELECTOR, ".content-item")) > old_count)
-        def confirmed(d):
-            for item in d.find_elements(By.CSS_SELECTOR, ".content-item"):
-                authors = item.find_elements(By.CSS_SELECTOR, ".author-name")
-                bodies = item.find_elements(By.CSS_SELECTOR, "article")
-                if any(a.text == username for a in authors) and any(b.text.strip() == text for b in bodies):
-                    return True
-            return False
-        wait.until(confirmed)
-        print("随机评论已确认：" + driver.current_url + " 内容：" + text)
-        return True
+        response = session.post(BASE + "/api/content/new-comment",
+            json={"content": comment, "mode": "new-comment", "postId": post_id},
+            headers={"Origin": BASE, "Referer": url, "csrf-token": secrets.token_urlsafe(12)},
+            timeout=30)
+        try:
+            data = response.json()
+        except ValueError:
+            raise RuntimeError("评论响应无法确认，已停止避免重复发送")
+        if not data.get("success"):
+            state.pop("comment_pending_date", None)
+            store.save(state)
+            raise RuntimeError("评论提交失败，HTTP " + str(response.status_code))
+        redirect = urljoin(BASE, str(data.get("redirect", "")))
+        if not re.fullmatch(re.escape(BASE) + rf"/post-{post_id}-\d+", redirect):
+            raise RuntimeError("评论已提交，但返回地址异常，已停止避免重复发送")
+        # Verify the published author and text before marking the day complete.
+        for _ in range(3):
+            response = session.get(redirect, timeout=30)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "html.parser")
+                for item in soup.select(".content-item"):
+                    author = item.select_one(".author-name")
+                    body = item.select_one("article")
+                    if author and body and author.get_text(strip=True) == username and body.get_text(strip=True) == comment:
+                        print("随机评论已确认：" + redirect + str(data.get("redirectHash", "")) + " 内容：" + comment)
+                        return True
+            time.sleep(2)
+        raise RuntimeError("评论已提交但未能确认，已停止避免重复发送")
     raise RuntimeError("未找到可评论的交易帖")
 
 
@@ -287,7 +261,6 @@ def main():
         state["seed_hash"] = seed_hash
         state.pop("needs_device_verification", None)
     session = cookie_session(state.get("cookies", []), state.get("headers"))
-    driver = None
     try:
         valid = bool(state.get("cookies")) and attendance(session)
         if not valid:
@@ -325,18 +298,13 @@ def main():
             elif state.get("comment_pending_date") == today:
                 raise RuntimeError("今天已有评论提交待确认，为避免重复发送已停止")
             else:
-                if driver:
-                    driver.quit()
-                driver = setup_driver(session)
-                random_comment(driver, store, state, today)
+                random_comment(session, store, state, today)
                 state["comment_date"] = today
                 state.pop("comment_pending_date", None)
                 state["cookies"] = dump_cookies(session)
                 store.save(state)
         print("每日任务完成")
     finally:
-        if driver:
-            driver.quit()
         session.close()
 
 

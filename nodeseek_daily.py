@@ -166,7 +166,7 @@ def attendance(session):
     raise RuntimeError("签到失败（响应状态：" + str(data.get("status", "unknown")) + "）")
 
 
-def setup_driver(session):
+def setup_driver(session, page="/categories/trade"):
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -190,11 +190,46 @@ def setup_driver(session):
                 driver.add_cookie({"name": item.name, "value": item.value,
                                    "domain": item.domain, "path": item.path or "/",
                                    "secure": item.secure})
-        driver.get(BASE + "/categories/trade")
+        driver.get(BASE + page)
         return driver
     except Exception:
         driver.quit()
         raise
+
+
+
+def browser_login_cookie(session, driver):
+    # Let the site's own client create its session Cookie after API authentication.
+    page = session.get(LOGIN_URL, timeout=30).text
+    loader = re.search(r'src="(/assets/loader-[^"]+\\.js)"', page)
+    if not loader:
+        raise RuntimeError("无法定位 NodeSeek 登录客户端")
+    script = session.get(BASE + loader.group(1), timeout=30).text
+    module = re.search(r'assets/tokens-[^"]+\\.js', script)
+    if not module:
+        raise RuntimeError("无法定位 NodeSeek 会话模块")
+    fingerprint = driver.execute_async_script(
+        "const done=arguments[arguments.length-1];"
+        "import(arguments[0]).then(m=>m.a()).then(done).catch(()=>done(null));",
+        BASE + "/" + module.group(0))
+    if not fingerprint:
+        raise RuntimeError("浏览器会话初始化失败")
+    session.headers["x-integrity-token"] = fingerprint
+    login(session)
+    for header, storage in (("x-security-token", "security_token"), ("x-csrf-token", "csrf_token")):
+        if session.headers.get(header):
+            driver.execute_script("localStorage.setItem(arguments[0],arguments[1]);",
+                                  storage, session.headers[header])
+    driver.get(BASE + "/categories/trade")
+    username = os.environ["NS_USERNAME"]
+    WebDriverWait(driver, 45).until(lambda d: any(
+        a.text == username for a in d.find_elements(By.CSS_SELECTOR, ".nsk-right-panel-container a")))
+    # Cookie creation may trigger an automatic reload in the site's own bootstrap.
+    for item in driver.get_cookies():
+        session.cookies.set(item["name"], item["value"],
+                            domain=item["domain"], path=item.get("path", "/"))
+    if not dump_cookies(session):
+        raise RuntimeError("浏览器登录后仍未取得 Cookie")
 
 
 def random_comment(driver, store, state, today):
@@ -277,7 +312,8 @@ def main():
             print("没有有效 Cookie，使用账号密码和 YesCaptcha 登录")
             session.close()
             session = cookie_session([])
-            login(session)
+            driver = setup_driver(session, "/signIn.html")
+            browser_login_cookie(session, driver)
             state["cookies"] = dump_cookies(session)
             if not state["cookies"]:
                 raise RuntimeError("登录未返回 Cookie")
@@ -300,6 +336,8 @@ def main():
             elif state.get("comment_pending_date") == today:
                 raise RuntimeError("今天已有评论提交待确认，为避免重复发送已停止")
             else:
+                if driver:
+                    driver.quit()
                 driver = setup_driver(session)
                 random_comment(driver, store, state, today)
                 state["comment_date"] = today

@@ -77,7 +77,8 @@ class Tests(unittest.TestCase):
         with patch.object(app, "StateStore", return_value=store), \
              patch.object(app, "cookie_session", side_effect=session), \
              patch.object(app, "attendance", side_effect=[False, True]), \
-             patch.object(app, "login", side_effect=login), \
+             patch.object(app, "browser_login_cookie", side_effect=lambda s, d: login(s)), \
+             patch.object(app, "setup_driver", return_value=Mock()), \
              patch.object(app, "dump_cookies", return_value=[{"value": "new"}]):
             app.main()
         self.assertEqual(events, ["cookie:old", "cookie:empty", "login", "write", "cookie:new"])

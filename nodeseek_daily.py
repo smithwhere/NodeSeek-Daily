@@ -74,7 +74,7 @@ class StateStore:
 
 def dump_cookies(session):
     return [{"name": item.name, "value": item.value, "domain": item.domain,
-             "path": item.path or "/", "secure": item.secure, "expires": item.expires}
+             "path": item.path or "/", "secure": item.secure}
             for item in session.cookies.jar if item.domain.endswith("nodeseek.com")]
 
 
@@ -82,8 +82,6 @@ def cookie_session(cookies, headers=None):
     session = browser_requests.Session(impersonate="chrome")
     session.headers.update(headers or {"x-integrity-token": uuid.uuid4().hex})
     for item in cookies:
-        if item.get("expires") and item["expires"] <= time.time():
-            continue
         session.cookies.set(item["name"], item["value"],
                             domain=item["domain"], path=item.get("path", "/"))
     return session
@@ -201,11 +199,11 @@ def setup_driver(session, page="/categories/trade"):
 def browser_login_cookie(session, driver):
     # Let the site's own client create its session Cookie after API authentication.
     page = session.get(LOGIN_URL, timeout=30).text
-    loader = re.search(r'src="(/assets/loader-[^"]+\\.js)"', page)
+    loader = re.search(r'src="(/assets/loader-[^"]+\.js)"', page)
     if not loader:
         raise RuntimeError("无法定位 NodeSeek 登录客户端")
     script = session.get(BASE + loader.group(1), timeout=30).text
-    module = re.search(r'assets/tokens-[^"]+\\.js', script)
+    module = re.search(r'assets/tokens-[^"]+\.js', script)
     if not module:
         raise RuntimeError("无法定位 NodeSeek 会话模块")
     fingerprint = driver.execute_async_script(

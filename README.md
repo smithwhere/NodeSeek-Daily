@@ -14,6 +14,7 @@
 - `NS_COOKIE`：可选，有效 Cookie 优先使用；失效时重新登录
 
 首次运行没有 Cookie 时使用账号密码登录。之后优先读取 `.state/nodeseek.enc` 中的加密 Cookie，失效后才重新登录。
+持久化文件长期保留，不设置客户端到期时间；实际会话是否有效由 NodeSeek 服务端决定。服务端失效后自动重新登录和更新。
 新 Cookie 用专用 Secret 加密后立即写回仓库，并重新读取、建立 Cookie 会话后继续签到。
 写回使用工作流的 `GITHUB_TOKEN`（仅需 contents: write），无需个人访问令牌。
 当天已评论或提交状态不明时不会重复发送。

@@ -206,10 +206,19 @@ def browser_login_cookie(session, driver):
     module = re.search(r'assets/tokens-[^"]+\.js', script)
     if not module:
         raise RuntimeError("无法定位 NodeSeek 会话模块")
+    print("浏览器页面：" + driver.title + " 路径：" + driver.current_url.split("?")[0])
+    public_script = session.get(BASE + "/static/js/msc-script.3732897e6a1c28f78f8687b1facd39b5.js", timeout=30)
+    if public_script.status_code == 200:
+        for match in re.finditer(r"(.{0,140}(?:x-security-token|security_token|csrf_token|document\\.cookie|/api/account)[^;]{0,250})", public_script.text):
+            print("公开客户端片段：" + match.group(1))
+    print("公开客户端状态：" + str(public_script.status_code))
     fingerprint = driver.execute_async_script(
         "const done=arguments[arguments.length-1];"
-        "import(arguments[0]).then(m=>m.a()).then(done).catch(()=>done(null));",
+        "import(arguments[0]).then(m=>m.a()).then(done).catch(e=>done({error:e.name,message:e.message}));",
         BASE + "/" + module.group(0))
+    if isinstance(fingerprint, dict):
+        print("客户端模块错误：" + str(fingerprint))
+        fingerprint = None
     if not fingerprint:
         raise RuntimeError("浏览器会话初始化失败")
     session.headers["x-integrity-token"] = fingerprint

@@ -260,7 +260,7 @@ class TradeCommentsTests(unittest.TestCase):
             self.assertTrue(app.random_comment(session, self.store, state, self.TODAY))
         self.assertEqual(session.post.call_count, 3)
         self.assertEqual(choice.call_count, 3)
-        self.assertEqual(len(app.DEFAULT_COMMENTS), 3)
+        self.assertEqual(len(app.DEFAULT_COMMENTS), 15)
         self.assertTrue(all(call.args[0] == app.DEFAULT_COMMENTS for call in choice.call_args_list))
         payloads = [call.kwargs["json"] for call in session.post.call_args_list]
         self.assertEqual([p["postId"] for p in payloads], [1, 2, 3])

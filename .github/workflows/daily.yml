@@ -5,9 +5,9 @@ on:
   schedule:
     - cron: '5 0 * * *' # 北京时间每天 00:05 主触发
       timezone: Asia/Shanghai
-    - cron: '25 0 * * *' # 北京时间每天 00:25 补跑检查
+    - cron: '0 5 * * *' # 北京时间每天 05:00 补跑检查
       timezone: Asia/Shanghai
-    - cron: '45 0 * * *' # 北京时间每天 00:45 补跑检查
+    - cron: '0 10 * * *' # 北京时间每天 10:00 补跑检查
       timezone: Asia/Shanghai
 
 permissions:

@@ -40,7 +40,7 @@ jobs:
           COOKIE_ENCRYPTION_KEY: ${{ secrets.COOKIE_ENCRYPTION_KEY }}
         run: |
           test -n "$NS_USERNAME" && test -n "$NS_PASSWORD" && test -n "$YESCAPTCHA_KEY" && test -n "$COOKIE_ENCRYPTION_KEY"
-      - name: Sign in and comment on five random second-page posts
+      - name: Sign in and post one random comment
         env:
           NS_USERNAME: ${{ secrets.NS_USERNAME }}
           NS_PASSWORD: ${{ secrets.NS_PASSWORD }}

@@ -197,6 +197,8 @@ class TradeCommentsTests(unittest.TestCase):
         self.env.start()
         self.shuffle = patch.object(app.random, "shuffle")
         self.shuffle_mock = self.shuffle.start()
+        self.interval = patch.object(app.random, "uniform", return_value=10)
+        self.interval.start()
         self.sleep = patch.object(app.time, "sleep")
         self.sleep_mock = self.sleep.start()
         self.cookies = patch.object(app, "dump_cookies", return_value=[])
@@ -207,6 +209,7 @@ class TradeCommentsTests(unittest.TestCase):
 
     def tearDown(self):
         self.cookies.stop()
+        self.interval.stop()
         self.sleep.stop()
         self.shuffle.stop()
         self.env.stop()
@@ -282,6 +285,12 @@ class TradeCommentsTests(unittest.TestCase):
         state = {}
         app.random_comment(session, self.store, state, self.TODAY)
         self.assertEqual([c.kwargs["json"]["postId"] for c in session.post.call_args_list], [3, 4, 5])
+
+    def test_comment_intervals_are_random_between_ten_and_fifteen_seconds(self):
+        with patch.object(app.random, "uniform", side_effect=[10.25, 14.75]) as interval:
+            app.random_comment(self.session([1, 2, 3]), self.store, {}, self.TODAY)
+        self.assertEqual([c.args for c in interval.call_args_list], [(10, 15), (10, 15)])
+        self.assertEqual([c.args[0] for c in self.sleep_mock.call_args_list], [10.25, 14.75])
 
     def test_partial_run_resumes_only_missing_posts_and_stops_at_three(self):
         state = {}

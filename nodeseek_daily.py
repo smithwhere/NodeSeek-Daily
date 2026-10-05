@@ -26,6 +26,7 @@ LOGIN_URL = BASE + "/signIn.html"
 SITEKEY = "0x4AAAAAAAaNy7leGjewpVyR"
 COMMENT_TARGET = 3
 COMMENT_INTERVAL_SECONDS = 10
+COMMENT_INTERVAL_RANGE = (10, 15)
 DEFAULT_COMMENTS = [
     "楼主辛苦了，感谢无私分享！",
     "字字珠玑，看完受益匪浅，果断收藏！",
@@ -423,7 +424,7 @@ def random_comment(session, store, state, today):
         post_id = int(re.search(r"/post-(\d+)-", url).group(1))
         comment = random.choice(texts)
         if sent_in_run:
-            time.sleep(COMMENT_INTERVAL_SECONDS)
+            time.sleep(random.uniform(*COMMENT_INTERVAL_RANGE))
         state["comment_pending_date"] = today
         state["comment_pending_post_id"] = post_id
         store.save(state)

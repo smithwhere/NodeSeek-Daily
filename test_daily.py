@@ -15,6 +15,7 @@ class Tests(unittest.TestCase):
             "COOKIE_ENCRYPTION_KEY": Fernet.generate_key().decode(),
             "GITHUB_TOKEN": "test-token", "GITHUB_REPOSITORY": "test/repo",
             "NS_COMMENT": "false", "NS_COOKIE": "",
+            "NS_FEED": "false",
         })
         self.env.start()
 
@@ -342,5 +343,239 @@ class TradeCommentsTests(unittest.TestCase):
         self.assertEqual(state["comment_date"], "2026-10-06")
 
 
+class FreeFeedTests(unittest.TestCase):
+    TODAY = "2026-10-05"
+
+    def setUp(self):
+        self.patches = [
+            patch.dict(os.environ, {"NS_USERNAME": "tester", "NS_FEED": "true"}),
+            patch.object(app.random, "shuffle"),
+            patch.object(app.time, "sleep"),
+            patch.object(app, "dump_cookies", return_value=[]),
+        ]
+        self.handles = [p.start() for p in self.patches]
+        self.snapshots = []
+        self.store = Mock()
+        self.store.save.side_effect = lambda state: self.snapshots.append(copy.deepcopy(state))
+
+    def tearDown(self):
+        for p in reversed(self.patches):
+            p.stop()
+
+    def session(self, ids=(1, 2, 3), maximum=2, used=0, overrides=None,
+                reject_at=None, unknown_at=None, changed_coin=False,
+                unchanged_quota=False, exhaust_on_recheck=False):
+        session = Mock()
+        quota = {"maxFreeLike": maximum, "freeLikeUsed": used}
+        reads = 0
+        listing = "".join(
+            f'<li class="post-list-item"><div class="post-title">'
+            f'<a href="/post-{i}-1">帖子 {i}</a></div></li>' for i in ids)
+
+        def get(url, **kwargs):
+            nonlocal reads
+            if url == app.BASE + "/api/progress/today?scope=freelike":
+                reads += 1
+                if exhaust_on_recheck and reads == 2:
+                    quota["freeLikeUsed"] = quota["maxFreeLike"]
+                response = Mock(status_code=200)
+                response.json.return_value = copy.deepcopy(quota)
+                return response
+            if url == app.BASE + "/categories/trade":
+                return Mock(status_code=200, text=listing)
+            post_id = int(app.re.search(r"/post-(\d+)-", url).group(1))
+            root = {"floorIndex": 0, "commentId": 1000 + post_id, "liked": False,
+                    "poster": {"name": "other", "uid": post_id, "isMe": False},
+                    "time": {"createdDate": app.datetime.now(app.ZoneInfo("Asia/Shanghai")).isoformat()}}
+            root.update((overrides or {}).get(post_id, {}))
+            config = {"user": {"coin": 1000, "member_id": 999},
+                      "postData": {"postId": post_id, "locked": False, "comments": [root]}}
+            encoded = base64.b64encode(json.dumps(config).encode()).decode()
+            return Mock(status_code=200, text=f'<script id="temp-script" type="application/json">{encoded}</script>')
+
+        def post(url, **kwargs):
+            self.assertEqual(url, app.BASE + "/api/statistics/like")
+            self.assertEqual(kwargs["json"]["action"], "add")
+            post_id = kwargs["json"]["commentId"] - 1000
+            response = Mock(status_code=200)
+            if post_id == reject_at:
+                response.json.return_value = {"success": False}
+                return response
+            if not unchanged_quota:
+                quota["freeLikeUsed"] += 1
+            if post_id == unknown_at:
+                response.json.side_effect = ValueError("invalid JSON")
+            else:
+                response.json.return_value = {"success": True, "current": 1,
+                                              "coin": 999 if changed_coin else 1000}
+            return response
+
+        session.get.side_effect = get
+        session.post.side_effect = post
+        return session
+
+    def test_only_two_free_legs_to_distinct_trade_posts(self):
+        state = {}
+        session = self.session(ids=[1, 1, 2, 3], maximum=5)
+        app.random_free_feed(session, self.store, state, self.TODAY)
+        self.assertEqual(session.post.call_count, 2)
+        self.assertEqual([c.kwargs["json"]["commentId"] for c in session.post.call_args_list], [1001, 1002])
+        self.assertEqual(state["fed_post_ids"], [1, 2])
+        self.assertEqual(state["feed_date"], self.TODAY)
+        self.assertNotIn("feed_pending_date", state)
+        self.assertEqual([c.args[0] for c in self.handles[2].call_args_list], [10])
+        self.assertEqual([len(s["fed_post_ids"]) for s in self.snapshots], [0, 1, 1, 2])
+        session.reset_mock()
+        app.random_free_feed(session, self.store, state, self.TODAY)
+        session.get.assert_not_called()
+        session.post.assert_not_called()
+
+    def test_no_free_quota_never_posts(self):
+        for maximum, used in [(0, 0), (2, 2), (3, 3), (3, 4)]:
+            with self.subTest(maximum=maximum):
+                session = self.session(maximum=maximum, used=used)
+                app.random_free_feed(session, self.store, {}, self.TODAY)
+                session.post.assert_not_called()
+
+    def test_quota_is_rechecked_after_persistence_before_post(self):
+        state = {}
+        session = self.session(exhaust_on_recheck=True)
+        app.random_free_feed(session, self.store, state, self.TODAY)
+        session.post.assert_not_called()
+        self.assertNotIn("feed_pending_date", state)
+        self.assertNotIn("feed_pending_date", self.snapshots[-1])
+
+    def test_partial_quota_or_candidates_resume_only_missing_leg(self):
+        for initial in [self.session(maximum=1), self.session(ids=[1])]:
+            state = {}
+            try:
+                app.random_free_feed(initial, self.store, state, self.TODAY)
+            except RuntimeError as error:
+                self.assertIn("1/2", str(error))
+            self.assertEqual(state["fed_post_ids"], [1])
+            self.assertNotIn("feed_date", state)
+            state = copy.deepcopy(self.snapshots[-1])
+            session = self.session(used=1)
+            app.random_free_feed(session, self.store, state, self.TODAY)
+            self.assertEqual(session.post.call_count, 1)
+            self.assertEqual(session.post.call_args.kwargs["json"]["commentId"], 1002)
+            self.assertEqual(state["feed_date"], self.TODAY)
+
+    def test_already_fed_own_and_old_posts_are_skipped(self):
+        session = self.session(ids=[1, 2, 3, 4, 5, 6], overrides={
+            1: {"liked": True},
+            2: {"poster": {"name": "tester", "uid": 999, "isMe": True}},
+            3: {"time": {"createdDate": "2000-01-01T00:00:00Z"}},
+            4: {"liked": None},
+        })
+        state = {}
+        app.random_free_feed(session, self.store, state, self.TODAY)
+        self.assertEqual(state["fed_post_ids"], [5, 6])
+
+    def test_unknown_or_unverified_submission_blocks_retry(self):
+        for options in [{"unknown_at": 1}, {"changed_coin": True}, {"unchanged_quota": True}]:
+            with self.subTest(options=options):
+                state = {}
+                session = self.session(**options)
+                with self.assertRaises(RuntimeError):
+                    app.random_free_feed(session, self.store, state, self.TODAY)
+                self.assertEqual(session.post.call_count, 1)
+                self.assertEqual(state["feed_pending_date"], self.TODAY)
+                state = copy.deepcopy(self.snapshots[-1])
+                session.reset_mock()
+                with self.assertRaisesRegex(RuntimeError, "提交待确认"):
+                    app.random_free_feed(session, self.store, state, self.TODAY)
+                session.post.assert_not_called()
+
+    def test_invalid_quota_is_rejected_before_post(self):
+        session = self.session(maximum="2")
+        with self.assertRaisesRegex(RuntimeError, "格式异常"):
+            app.random_free_feed(session, self.store, {}, self.TODAY)
+        session.post.assert_not_called()
+
+    def test_pending_checkpoint_failure_never_posts(self):
+        session = self.session()
+        self.store.save.side_effect = RuntimeError("写回失败")
+        with self.assertRaisesRegex(RuntimeError, "写回失败"):
+            app.random_free_feed(session, self.store, {}, self.TODAY)
+        session.post.assert_not_called()
+
+    def test_explicit_rejection_preserves_previous_success(self):
+        state = {}
+        session = self.session(reject_at=2)
+        with self.assertRaisesRegex(RuntimeError, "被拒绝"):
+            app.random_free_feed(session, self.store, state, self.TODAY)
+        self.assertEqual(state["fed_post_ids"], [1])
+        self.assertNotIn("feed_pending_date", state)
+        session = self.session(used=1)
+        app.random_free_feed(session, self.store, state, self.TODAY)
+        self.assertEqual(session.post.call_count, 1)
+
+    def test_new_day_resets_completed_feed_count(self):
+        state = {"feed_date": self.TODAY, "feed_progress_date": self.TODAY,
+                 "fed_post_ids": [10, 11]}
+        session = self.session()
+        app.random_free_feed(session, self.store, state, "2026-10-06")
+        self.assertEqual(state["fed_post_ids"], [1, 2])
+        self.assertEqual(state["feed_date"], "2026-10-06")
+
+    def test_manual_main_runs_feeding_even_when_comments_are_done(self):
+        today = app.datetime.now(app.ZoneInfo("Asia/Shanghai")).date().isoformat()
+        state = {"cookies": [{"value": "saved"}], "comment_date": today}
+        store = Mock(sha="existing")
+        store.load.return_value = state
+        with patch.dict(os.environ, {"NS_COOKIE": "", "NS_COMMENT": "true", "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
+             patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=Mock()), \
+             patch.object(app, "attendance", return_value=True), \
+             patch.object(app, "random_free_feed", return_value=True) as feed, \
+             patch.object(app, "random_comment") as comment:
+            app.main()
+        feed.assert_called_once()
+        comment.assert_not_called()
+
+    def test_manual_main_preserves_partial_progress_for_both_tasks(self):
+        today = app.datetime.now(app.ZoneInfo("Asia/Shanghai")).date().isoformat()
+        state = {"cookies": [{"value": "saved"}], "feed_progress_date": today,
+                 "fed_post_ids": [10], "comment_progress_date": today,
+                 "commented_post_ids": [20, 21]}
+        store = Mock(sha="existing")
+        store.load.return_value = state
+        with patch.dict(os.environ, {"NS_COOKIE": "", "NS_COMMENT": "true", "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
+             patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=Mock()), \
+             patch.object(app, "attendance", return_value=True), \
+             patch.object(app, "random_free_feed", return_value=True) as feed, \
+             patch.object(app, "random_comment", return_value=True) as comment:
+            app.main()
+        feed.assert_called_once()
+        comment.assert_called_once()
+        self.assertIs(feed.call_args.args[2], state)
+        self.assertIs(comment.call_args.args[2], state)
+        self.assertEqual(state["fed_post_ids"], [10])
+        self.assertEqual(state["commented_post_ids"], [20, 21])
+
+    def test_manual_main_does_not_repeat_completed_daily_tasks(self):
+        today = app.datetime.now(app.ZoneInfo("Asia/Shanghai")).date().isoformat()
+        state = {"cookies": [{"value": "saved"}], "feed_date": today,
+                 "feed_progress_date": today, "fed_post_ids": [10, 11],
+                 "comment_date": today, "comment_progress_date": today,
+                 "commented_post_ids": [20, 21, 22]}
+        store = Mock(sha="existing")
+        store.load.return_value = state
+        session = Mock()
+        with patch.dict(os.environ, {"NS_COOKIE": "", "NS_COMMENT": "true", "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
+             patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=session), \
+             patch.object(app, "attendance", return_value=True), \
+             patch.object(app, "random_comment") as comment:
+            app.main()
+        session.get.assert_not_called()
+        session.post.assert_not_called()
+        comment.assert_not_called()
+        store.save.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
+

@@ -1,4 +1,4 @@
-name: NodeSeek 自动签到和随机评论
+name: NodeSeek 自动签到、随机评论和免费投喂
 
 on:
   workflow_dispatch:
@@ -40,7 +40,7 @@ jobs:
           COOKIE_ENCRYPTION_KEY: ${{ secrets.COOKIE_ENCRYPTION_KEY }}
         run: |
           test -n "$NS_USERNAME" && test -n "$NS_PASSWORD" && test -n "$YESCAPTCHA_KEY" && test -n "$COOKIE_ENCRYPTION_KEY"
-      - name: Sign in and comment on three random trade posts
+      - name: Sign in, feed two free chicken legs and comment on three trade posts
         env:
           NS_USERNAME: ${{ secrets.NS_USERNAME }}
           NS_PASSWORD: ${{ secrets.NS_PASSWORD }}
@@ -51,5 +51,6 @@ jobs:
           NS_COMMENT_TEXTS: ${{ vars.NS_COMMENT_TEXTS }}
           NS_RANDOM: "false"
           NS_COMMENT: "true"
+          NS_FEED: "true"
           PYTHONUNBUFFERED: "1"
         run: python nodeseek_daily.py

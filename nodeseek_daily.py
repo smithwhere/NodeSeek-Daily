@@ -26,6 +26,7 @@ LOGIN_URL = BASE + "/signIn.html"
 SITEKEY = "0x4AAAAAAAaNy7leGjewpVyR"
 COMMENT_TARGET = 3
 COMMENT_INTERVAL_SECONDS = 10
+FREE_FEED_TARGET = 2
 DEFAULT_COMMENTS = [
     "楼主辛苦了，感谢无私分享！",
     "字字珠玑，看完受益匪浅，果断收藏！",
@@ -217,6 +218,155 @@ def attendance(session):
     raise RuntimeError("签到失败（响应状态：" + str(data.get("status", "unknown")) + "）")
 
 
+def free_like_progress(session):
+    response = session.get(BASE + "/api/progress/today?scope=freelike", timeout=30)
+    if response.status_code != 200:
+        raise RuntimeError("免费投喂额度读取失败，HTTP " + str(response.status_code))
+    try:
+        data = response.json()
+    except ValueError:
+        raise RuntimeError("免费投喂额度响应无法确认，已停止")
+    maximum = data.get("maxFreeLike") if isinstance(data, dict) else None
+    used = data.get("freeLikeUsed") if isinstance(data, dict) else None
+    if (type(maximum) is not int or type(used) is not int or
+            maximum < 0 or used < 0):
+        raise RuntimeError("免费投喂额度格式异常，已停止")
+    return maximum, used
+
+
+def post_page_config(page):
+    tag = BeautifulSoup(page, "html.parser").select_one("script#temp-script")
+    if not tag:
+        raise RuntimeError("投喂帖子状态无法确认，已停止")
+    try:
+        data = json.loads(base64.b64decode(tag.get_text().strip(), validate=True))
+    except (ValueError, UnicodeError):
+        raise RuntimeError("投喂帖子状态格式异常，已停止")
+    if not isinstance(data, dict) or not isinstance(data.get("postData"), dict):
+        raise RuntimeError("投喂帖子状态格式异常，已停止")
+    return data
+
+
+def clear_feed_pending(state):
+    state.pop("feed_pending_date", None)
+    state.pop("feed_pending_post_id", None)
+
+
+def random_free_feed(session, store, state, today):
+    if state.get("feed_pending_date") == today:
+        raise RuntimeError("今天已有投喂提交待确认，为避免重复或付费投喂已停止")
+    if state.get("feed_date") == today:
+        print("今天的 2 个免费鸡腿已投喂，跳过重复发送")
+        return True
+    if state.get("feed_progress_date") != today:
+        state["feed_progress_date"] = today
+        state["fed_post_ids"] = []
+        clear_feed_pending(state)
+    completed = state["fed_post_ids"]
+    if len(completed) >= FREE_FEED_TARGET:
+        state["feed_date"] = today
+        store.save(state)
+        return True
+    maximum, used = free_like_progress(session)
+    if used >= maximum:
+        print(f"免费投喂额度不足，今天已投喂 {len(completed)}/2，跳过付费投喂")
+        return True
+    response = session.get(BASE + "/categories/trade", timeout=30)
+    if response.status_code != 200:
+        raise RuntimeError("投喂交易列表读取失败，HTTP " + str(response.status_code))
+    urls = []
+    seen = set(completed)
+    for post in BeautifulSoup(response.text, "html.parser").select(".post-list-item"):
+        link = post.select_one(".post-title a")
+        if (post.select_one(".pined, .pinned") or "只读" in post.get_text() or not link or
+                any(word in link.get_text() for word in ["已出", "已收", "不出了", "没有了"])):
+            continue
+        url = urljoin(BASE, link.get("href", ""))
+        match = re.fullmatch(re.escape(BASE) + r"/post-(\d+)-\d+", url)
+        if match and int(match.group(1)) not in seen:
+            seen.add(int(match.group(1)))
+            urls.append((int(match.group(1)), BASE + "/post-" + match.group(1) + "-1"))
+    random.shuffle(urls)
+    sent_in_run = 0
+    for post_id, url in urls:
+        response = session.get(url, timeout=30)
+        if response.status_code != 200:
+            continue
+        config = post_page_config(response.text)
+        user = config.get("user")
+        post = config["postData"]
+        if not isinstance(user, dict) or type(user.get("coin")) is not int:
+            raise RuntimeError("投喂登录状态或余额无法确认，已停止")
+        if post.get("postId") != post_id or post.get("locked"):
+            continue
+        root = next((item for item in post.get("comments", [])
+                     if item.get("floorIndex") == 0), None)
+        if not root or root.get("liked") is not False or type(root.get("commentId")) is not int:
+            continue
+        poster = root.get("poster", {})
+        if (poster.get("isMe") or poster.get("uid") == user.get("member_id") or
+                poster.get("name") == os.getenv("NS_USERNAME", "")):
+            continue
+        try:
+            created = datetime.fromisoformat(root["time"]["createdDate"].replace("Z", "+00:00"))
+            age = (datetime.now(ZoneInfo("Asia/Shanghai")) - created).total_seconds()
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not 0 <= age < 7 * 24 * 60 * 60:
+            continue
+        if sent_in_run:
+            time.sleep(COMMENT_INTERVAL_SECONDS)
+        state["feed_pending_date"] = today
+        state["feed_pending_post_id"] = post_id
+        store.save(state)
+        # Recheck after the persistence request, immediately before sending.
+        try:
+            maximum, used = free_like_progress(session)
+        except Exception:
+            clear_feed_pending(state)
+            store.save(state)
+            raise
+        if used >= maximum:
+            clear_feed_pending(state)
+            store.save(state)
+            print("免费额度已用完，跳过付费投喂")
+            return True
+        response = session.post(BASE + "/api/statistics/like",
+            json={"commentId": root["commentId"], "action": "add"},
+            headers={"Origin": BASE, "Referer": url}, timeout=30)
+        try:
+            result = response.json()
+        except ValueError:
+            raise RuntimeError("投喂响应无法确认，已停止避免重复发送")
+        if not isinstance(result, dict) or type(result.get("success")) is not bool:
+            raise RuntimeError("投喂响应无法确认，已停止避免重复发送")
+        if result["success"] is False:
+            clear_feed_pending(state)
+            store.save(state)
+            raise RuntimeError("免费投喂被拒绝，HTTP " + str(response.status_code))
+        if response.status_code != 200:
+            raise RuntimeError("投喂响应状态异常，已停止避免重复发送")
+        if type(result.get("coin")) is not int or result["coin"] != user["coin"]:
+            raise RuntimeError("投喂后余额无法确认或发生变化，已停止后续投喂")
+        after_maximum, after_used = free_like_progress(session)
+        if after_maximum != maximum or after_used != used + 1:
+            raise RuntimeError("投喂已提交但免费额度变化无法确认，已停止避免重复发送")
+        completed.append(post_id)
+        sent_in_run += 1
+        clear_feed_pending(state)
+        if len(completed) >= FREE_FEED_TARGET:
+            state["feed_date"] = today
+        state["cookies"] = dump_cookies(session)
+        store.save(state)
+        print(f"免费投喂已确认：{url}，今天 {len(completed)}/2")
+        if len(completed) >= FREE_FEED_TARGET:
+            return True
+        if after_used >= after_maximum:
+            print("剩余免费额度不足，跳过付费投喂")
+            return True
+    raise RuntimeError(f"可免费投喂的交易帖不足，今天已完成 {len(completed)}/2；补跑将继续剩余额度")
+
+
 def random_comment(session, store, state, today):
     if state.get("comment_pending_date") == today:
         raise RuntimeError("今天已有评论提交待确认，为避免重复发送已停止")
@@ -371,6 +521,8 @@ def main():
         elif not store.sha or seed_changed:
             store.save(state)
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        if env_bool("NS_FEED", True):
+            random_free_feed(session, store, state, today)
         if env_bool("NS_COMMENT", True):
             if state.get("comment_date") == today:
                 print("今天的随机评论已完成，跳过重复发送")
@@ -397,3 +549,4 @@ if __name__ == "__main__":
         else:
             print("任务失败：" + type(error).__name__)
         sys.exit(1)
+

@@ -414,21 +414,29 @@ class FreeFeedTests(unittest.TestCase):
         session.post.side_effect = post
         return session
 
-    def test_only_two_free_legs_to_distinct_trade_posts(self):
+    def test_uses_all_free_quota_on_distinct_trade_posts(self):
         state = {}
-        session = self.session(ids=[1, 1, 2, 3], maximum=5)
+        session = self.session(ids=[1, 1, 2, 3, 4, 5, 6], maximum=5)
         app.random_free_feed(session, self.store, state, self.TODAY)
-        self.assertEqual(session.post.call_count, 2)
-        self.assertEqual([c.kwargs["json"]["commentId"] for c in session.post.call_args_list], [1001, 1002])
-        self.assertEqual(state["fed_post_ids"], [1, 2])
-        self.assertEqual(state["feed_date"], self.TODAY)
+        self.assertEqual(session.post.call_count, 5)
+        self.assertEqual([c.kwargs["json"]["commentId"] for c in session.post.call_args_list], [1001, 1002, 1003, 1004, 1005])
+        self.assertEqual(state["fed_post_ids"], [1, 2, 3, 4, 5])
         self.assertNotIn("feed_pending_date", state)
-        self.assertEqual([c.args[0] for c in self.handles[2].call_args_list], [10])
-        self.assertEqual([len(s["fed_post_ids"]) for s in self.snapshots], [0, 1, 1, 2])
+        self.assertEqual([c.args[0] for c in self.handles[2].call_args_list], [10, 10, 10, 10])
+        self.assertEqual([len(s["fed_post_ids"]) for s in self.snapshots], [0, 1, 1, 2, 2, 3, 3, 4, 4, 5])
         session.reset_mock()
         app.random_free_feed(session, self.store, state, self.TODAY)
-        session.get.assert_not_called()
+        session.get.assert_called_once_with(app.BASE + "/api/progress/today?scope=freelike", timeout=30)
         session.post.assert_not_called()
+
+    def test_legacy_completed_task_uses_server_remaining_quota(self):
+        state = {"feed_date": self.TODAY, "feed_progress_date": self.TODAY,
+                 "fed_post_ids": [1, 2]}
+        session = self.session(ids=[1, 2, 3, 4, 5, 6], maximum=6, used=3)
+        app.random_free_feed(session, self.store, state, self.TODAY)
+        self.assertEqual(session.post.call_count, 3)
+        self.assertEqual(state["fed_post_ids"], [1, 2, 3, 4, 5])
+        self.assertNotIn("feed_date", state)
 
     def test_no_free_quota_never_posts(self):
         for maximum, used in [(0, 0), (2, 2), (3, 3), (3, 4)]:
@@ -451,7 +459,7 @@ class FreeFeedTests(unittest.TestCase):
             try:
                 app.random_free_feed(initial, self.store, state, self.TODAY)
             except RuntimeError as error:
-                self.assertIn("1/2", str(error))
+                self.assertIn("剩余免费额度 1", str(error))
             self.assertEqual(state["fed_post_ids"], [1])
             self.assertNotIn("feed_date", state)
             state = copy.deepcopy(self.snapshots[-1])
@@ -459,7 +467,7 @@ class FreeFeedTests(unittest.TestCase):
             app.random_free_feed(session, self.store, state, self.TODAY)
             self.assertEqual(session.post.call_count, 1)
             self.assertEqual(session.post.call_args.kwargs["json"]["commentId"], 1002)
-            self.assertEqual(state["feed_date"], self.TODAY)
+            self.assertEqual(state["fed_post_ids"], [1, 2])
 
     def test_already_fed_own_and_old_posts_are_skipped(self):
         session = self.session(ids=[1, 2, 3, 4, 5, 6], overrides={
@@ -517,7 +525,7 @@ class FreeFeedTests(unittest.TestCase):
         session = self.session()
         app.random_free_feed(session, self.store, state, "2026-10-06")
         self.assertEqual(state["fed_post_ids"], [1, 2])
-        self.assertEqual(state["feed_date"], "2026-10-06")
+        self.assertNotIn("feed_date", state)
 
     def test_manual_main_runs_feeding_even_when_comments_are_done(self):
         today = app.datetime.now(app.ZoneInfo("Asia/Shanghai")).date().isoformat()
@@ -563,14 +571,14 @@ class FreeFeedTests(unittest.TestCase):
                  "commented_post_ids": [20, 21, 22]}
         store = Mock(sha="existing")
         store.load.return_value = state
-        session = Mock()
+        session = self.session(used=2)
         with patch.dict(os.environ, {"NS_COOKIE": "", "NS_COMMENT": "true", "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
              patch.object(app, "StateStore", return_value=store), \
              patch.object(app, "cookie_session", return_value=session), \
              patch.object(app, "attendance", return_value=True), \
              patch.object(app, "random_comment") as comment:
             app.main()
-        session.get.assert_not_called()
+        session.get.assert_called_once_with(app.BASE + "/api/progress/today?scope=freelike", timeout=30)
         session.post.assert_not_called()
         comment.assert_not_called()
         store.save.assert_not_called()

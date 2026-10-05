@@ -26,7 +26,6 @@ LOGIN_URL = BASE + "/signIn.html"
 SITEKEY = "0x4AAAAAAAaNy7leGjewpVyR"
 COMMENT_TARGET = 3
 COMMENT_INTERVAL_SECONDS = 10
-FREE_FEED_TARGET = 2
 DEFAULT_COMMENTS = [
     "楼主辛苦了，感谢无私分享！",
     "字字珠玑，看完受益匪浅，果断收藏！",
@@ -255,21 +254,16 @@ def clear_feed_pending(state):
 def random_free_feed(session, store, state, today):
     if state.get("feed_pending_date") == today:
         raise RuntimeError("今天已有投喂提交待确认，为避免重复或付费投喂已停止")
-    if state.get("feed_date") == today:
-        print("今天的 2 个免费鸡腿已投喂，跳过重复发送")
-        return True
+    # Always consult the server, including after the old two-leg task completed.
+    state.pop("feed_date", None)
     if state.get("feed_progress_date") != today:
         state["feed_progress_date"] = today
         state["fed_post_ids"] = []
         clear_feed_pending(state)
     completed = state["fed_post_ids"]
-    if len(completed) >= FREE_FEED_TARGET:
-        state["feed_date"] = today
-        store.save(state)
-        return True
     maximum, used = free_like_progress(session)
     if used >= maximum:
-        print(f"免费投喂额度不足，今天已投喂 {len(completed)}/2，跳过付费投喂")
+        print(f"免费投喂额度已用完（{used}/{maximum}），本脚本今天已投喂 {len(completed)} 个")
         return True
     response = session.get(BASE + "/categories/trade", timeout=30)
     if response.status_code != 200:
@@ -354,17 +348,17 @@ def random_free_feed(session, store, state, today):
         completed.append(post_id)
         sent_in_run += 1
         clear_feed_pending(state)
-        if len(completed) >= FREE_FEED_TARGET:
-            state["feed_date"] = today
         state["cookies"] = dump_cookies(session)
         store.save(state)
-        print(f"免费投喂已确认：{url}，今天 {len(completed)}/2")
-        if len(completed) >= FREE_FEED_TARGET:
-            return True
+        print(f"免费投喂已确认：{url}，本脚本今天已投喂 {len(completed)} 个，剩余免费额度 {max(0, after_maximum - after_used)}")
         if after_used >= after_maximum:
-            print("剩余免费额度不足，跳过付费投喂")
+            print("免费额度已用完，停止投喂")
             return True
-    raise RuntimeError(f"可免费投喂的交易帖不足，今天已完成 {len(completed)}/2；补跑将继续剩余额度")
+    maximum, used = free_like_progress(session)
+    if used >= maximum:
+        print("免费额度已用完，停止投喂")
+        return True
+    raise RuntimeError(f"可免费投喂的交易帖不足，本脚本今天已投喂 {len(completed)} 个，剩余免费额度 {maximum - used}；补跑将继续")
 
 
 def random_comment(session, store, state, today):

@@ -364,20 +364,28 @@ def random_free_feed(session, store, state, today):
 def random_comment(session, store, state, today):
     if state.get("comment_pending_date") == today:
         raise RuntimeError("今天已有评论提交待确认，为避免重复发送已停止")
-    if state.get("comment_date") == today:
-        return True
     raw = os.getenv("NS_COMMENT_TEXTS", "")
     texts = json.loads(raw) if raw else DEFAULT_COMMENTS
     if not isinstance(texts, list) or not texts or any(
             not isinstance(x, str) or not x.strip() for x in texts):
         raise RuntimeError("NS_COMMENT_TEXTS 必须是非空字符串的 JSON 数组")
     if state.get("comment_progress_date") != today:
+        # The original one-post task saved only its completion date.
+        legacy_count = 1 if state.get("comment_date") == today else 0
         state["comment_progress_date"] = today
         state["commented_post_ids"] = []
+        state["comment_legacy_count"] = legacy_count
+        state.pop("comment_date", None)
+        if legacy_count:
+            print("旧版今天已完成 1 条交易区评论，继续补足至 3 条")
+            store.save(state)
     completed = state["commented_post_ids"]
-    if len(completed) >= COMMENT_TARGET:
-        state["comment_date"] = today
-        store.save(state)
+    legacy_count = state.get("comment_legacy_count", 0)
+    if len(completed) + legacy_count >= COMMENT_TARGET:
+        if state.get("comment_date") != today:
+            state["comment_date"] = today
+            store.save(state)
+        print("今天已确认评论 3/3 个交易区帖子，跳过重复发送")
         return True
     response = session.get(BASE + "/categories/trade", timeout=30)
     if response.status_code != 200:
@@ -457,13 +465,14 @@ def random_comment(session, store, state, today):
         sent_in_run += 1
         state.pop("comment_pending_date", None)
         state.pop("comment_pending_post_id", None)
-        if len(completed) >= COMMENT_TARGET:
+        if len(completed) + legacy_count >= COMMENT_TARGET:
             state["comment_date"] = today
+        state["cookies"] = dump_cookies(session)
         store.save(state)
-        print(f"今天已确认评论 {len(completed)}/{COMMENT_TARGET} 个交易区帖子")
-        if len(completed) >= COMMENT_TARGET:
+        print(f"今天已确认评论 {len(completed) + legacy_count}/{COMMENT_TARGET} 个交易区帖子")
+        if len(completed) + legacy_count >= COMMENT_TARGET:
             return True
-    raise RuntimeError(f"交易区可评论帖子不足，今天已完成 {len(completed)}/{COMMENT_TARGET}；补跑将继续剩余额度")
+    raise RuntimeError(f"交易区可评论帖子不足，今天已完成 {len(completed) + legacy_count}/{COMMENT_TARGET}；补跑将继续剩余额度")
 
 
 def main():
@@ -515,19 +524,12 @@ def main():
         elif not store.sha or seed_changed:
             store.save(state)
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        if env_bool("NS_COMMENT", True):
+            if state.get("comment_pending_date") == today:
+                raise RuntimeError("今天已有评论提交待确认，为避免重复发送已停止")
+            random_comment(session, store, state, today)
         if env_bool("NS_FEED", True):
             random_free_feed(session, store, state, today)
-        if env_bool("NS_COMMENT", True):
-            if state.get("comment_date") == today:
-                print("今天的随机评论已完成，跳过重复发送")
-            elif state.get("comment_pending_date") == today:
-                raise RuntimeError("今天已有评论提交待确认，为避免重复发送已停止")
-            else:
-                random_comment(session, store, state, today)
-                state["comment_date"] = today
-                state.pop("comment_pending_date", None)
-                state["cookies"] = dump_cookies(session)
-                store.save(state)
         print("每日任务完成")
     finally:
         session.close()

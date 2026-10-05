@@ -199,11 +199,14 @@ class TradeCommentsTests(unittest.TestCase):
         self.shuffle_mock = self.shuffle.start()
         self.sleep = patch.object(app.time, "sleep")
         self.sleep_mock = self.sleep.start()
+        self.cookies = patch.object(app, "dump_cookies", return_value=[])
+        self.cookies.start()
         self.snapshots = []
         self.store = Mock()
         self.store.save.side_effect = lambda state: self.snapshots.append(copy.deepcopy(state))
 
     def tearDown(self):
+        self.cookies.stop()
         self.sleep.stop()
         self.shuffle.stop()
         self.env.stop()
@@ -332,14 +335,34 @@ class TradeCommentsTests(unittest.TestCase):
             app.random_comment(session, self.store, {}, self.TODAY)
         self.assertEqual(session.post.call_count, 1)
 
-    def test_new_day_resets_count_and_legacy_completed_day_is_skipped(self):
+    def test_legacy_one_comment_is_migrated_and_only_two_are_added(self):
         state = {"comment_date": self.TODAY}
-        session = self.session(range(1, 7))
+        session = self.session(range(1, 7), own=[1])
+        app.random_comment(session, self.store, state, self.TODAY)
+        self.assertEqual([c.kwargs["json"]["postId"] for c in session.post.call_args_list], [2, 3])
+        self.assertEqual(state["comment_legacy_count"], 1)
+        self.assertEqual(self.snapshots[0]["comment_legacy_count"], 1)
+        self.assertEqual(state["comment_date"], self.TODAY)
+        session.reset_mock()
         app.random_comment(session, self.store, state, self.TODAY)
         session.get.assert_not_called()
-        state.update(comment_progress_date=self.TODAY, commented_post_ids=[10, 11, 12, 13, 14])
+        session.post.assert_not_called()
+
+    def test_completion_date_cannot_skip_partial_three_post_progress(self):
+        state = {"comment_date": self.TODAY, "comment_progress_date": self.TODAY,
+                 "commented_post_ids": [1]}
+        session = self.session(range(1, 7))
+        app.random_comment(session, self.store, state, self.TODAY)
+        self.assertEqual([c.kwargs["json"]["postId"] for c in session.post.call_args_list], [2, 3])
+        self.assertEqual(state["commented_post_ids"], [1, 2, 3])
+
+    def test_new_day_resets_legacy_and_recorded_counts(self):
+        state = {"comment_date": self.TODAY, "comment_progress_date": self.TODAY,
+                 "comment_legacy_count": 1, "commented_post_ids": [10, 11]}
+        session = self.session(range(1, 7))
         app.random_comment(session, self.store, state, "2026-10-06")
         self.assertEqual(state["commented_post_ids"], [1, 2, 3])
+        self.assertEqual(state["comment_legacy_count"], 0)
         self.assertEqual(state["comment_date"], "2026-10-06")
 
 
@@ -529,18 +552,38 @@ class FreeFeedTests(unittest.TestCase):
 
     def test_manual_main_runs_feeding_even_when_comments_are_done(self):
         today = app.datetime.now(app.ZoneInfo("Asia/Shanghai")).date().isoformat()
-        state = {"cookies": [{"value": "saved"}], "comment_date": today}
+        state = {"cookies": [{"value": "saved"}], "comment_date": today,
+                 "comment_progress_date": today, "commented_post_ids": [1, 2, 3]}
         store = Mock(sha="existing")
         store.load.return_value = state
         with patch.dict(os.environ, {"NS_COOKIE": "", "NS_COMMENT": "true", "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
              patch.object(app, "StateStore", return_value=store), \
              patch.object(app, "cookie_session", return_value=Mock()), \
              patch.object(app, "attendance", return_value=True), \
-             patch.object(app, "random_free_feed", return_value=True) as feed, \
-             patch.object(app, "random_comment") as comment:
+             patch.object(app, "random_free_feed", return_value=True) as feed:
             app.main()
         feed.assert_called_once()
-        comment.assert_not_called()
+
+    def test_manual_main_migrates_legacy_comment_before_feeding(self):
+        today = app.datetime.now(app.ZoneInfo("Asia/Shanghai")).date().isoformat()
+        state = {"cookies": [{"value": "saved"}], "comment_date": today}
+        store = Mock(sha="existing")
+        store.load.return_value = state
+        calls = []
+        def comment(session, store, state, today):
+            calls.append("comment")
+        def feed(session, store, state, today):
+            calls.append("feed")
+            raise RuntimeError("投喂额度读取失败")
+        with patch.dict(os.environ, {"NS_COOKIE": "", "NS_COMMENT": "true", "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
+             patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=Mock()), \
+             patch.object(app, "attendance", return_value=True), \
+             patch.object(app, "random_comment", side_effect=comment), \
+             patch.object(app, "random_free_feed", side_effect=feed):
+            with self.assertRaisesRegex(RuntimeError, "投喂额度读取失败"):
+                app.main()
+        self.assertEqual(calls, ["comment", "feed"])
 
     def test_manual_main_preserves_partial_progress_for_both_tasks(self):
         today = app.datetime.now(app.ZoneInfo("Asia/Shanghai")).date().isoformat()
@@ -575,12 +618,10 @@ class FreeFeedTests(unittest.TestCase):
         with patch.dict(os.environ, {"NS_COOKIE": "", "NS_COMMENT": "true", "GITHUB_EVENT_NAME": "workflow_dispatch"}), \
              patch.object(app, "StateStore", return_value=store), \
              patch.object(app, "cookie_session", return_value=session), \
-             patch.object(app, "attendance", return_value=True), \
-             patch.object(app, "random_comment") as comment:
+             patch.object(app, "attendance", return_value=True):
             app.main()
         session.get.assert_called_once_with(app.BASE + "/api/progress/today?scope=freelike", timeout=30)
         session.post.assert_not_called()
-        comment.assert_not_called()
         store.save.assert_not_called()
 
 

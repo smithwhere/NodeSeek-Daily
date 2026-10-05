@@ -185,7 +185,7 @@ class Tests(unittest.TestCase):
         post.assert_not_called()
 
 
-class HomepageCommentsTests(unittest.TestCase):
+class SecondPageCommentsTests(unittest.TestCase):
     TODAY = "2026-10-05"
     TEXTS = ["第一条。", "第二条！", "第三条？", "第四条。", "第五条。"]
 
@@ -217,7 +217,7 @@ class HomepageCommentsTests(unittest.TestCase):
             for post_id in ids)
 
         def get(url, **kwargs):
-            if url == app.BASE + "/":
+            if url == app.BASE + "/page-2":
                 return Mock(status_code=200, text=listing)
             post_id = int(app.re.search(r"/post-(\d+)-", url).group(1))
             body = '<div id="editor"></div>' if post_id not in unavailable else ""
@@ -246,7 +246,7 @@ class HomepageCommentsTests(unittest.TestCase):
         session.post.side_effect = post
         return session
 
-    def test_five_distinct_homepage_posts_choose_text_independently(self):
+    def test_five_distinct_second_page_posts_choose_text_independently(self):
         session = self.session(range(1, 9))
         state = {}
         with patch.object(app.random, "choice", side_effect=self.TEXTS) as choice:
@@ -262,7 +262,7 @@ class HomepageCommentsTests(unittest.TestCase):
         self.assertNotIn("comment_pending_date", state)
         self.shuffle_mock.assert_called_once()
         self.assertEqual([c.args[0] for c in self.sleep_mock.call_args_list], [10, 10, 10, 10])
-        self.assertEqual(session.get.call_args_list[0].args[0], app.BASE + "/")
+        self.assertEqual(session.get.call_args_list[0].args[0], app.BASE + "/page-2")
         checkpoints = [s for s in self.snapshots if "comment_pending_date" not in s]
         self.assertEqual([len(s["commented_post_ids"]) for s in checkpoints], [1, 2, 3, 4, 5])
 

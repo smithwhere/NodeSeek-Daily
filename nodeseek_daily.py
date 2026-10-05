@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""NodeSeek daily attendance and five random homepage comments.
+"""NodeSeek daily attendance and five random homepage second-page comments.
 Copyright (c) 2024 Hosea. Licensed under the MIT License.
 """
 import base64
@@ -235,9 +235,9 @@ def random_comment(session, store, state, today):
         state["comment_date"] = today
         store.save(state)
         return True
-    response = session.get(BASE + "/", timeout=30)
+    response = session.get(BASE + "/page-2", timeout=30)
     if response.status_code != 200:
-        raise RuntimeError("首页列表读取失败，HTTP " + str(response.status_code))
+        raise RuntimeError("首页第二页列表读取失败，HTTP " + str(response.status_code))
     soup = BeautifulSoup(response.text, "html.parser")
     urls = []
     seen = set(completed)
@@ -316,10 +316,10 @@ def random_comment(session, store, state, today):
         if len(completed) >= COMMENT_TARGET:
             state["comment_date"] = today
         store.save(state)
-        print(f"今天已确认评论 {len(completed)}/{COMMENT_TARGET} 个首页帖子")
+        print(f"今天已确认评论 {len(completed)}/{COMMENT_TARGET} 个首页第二页帖子")
         if len(completed) >= COMMENT_TARGET:
             return True
-    raise RuntimeError(f"首页可评论帖子不足，今天已完成 {len(completed)}/{COMMENT_TARGET}；补跑将继续剩余额度")
+    raise RuntimeError(f"首页第二页可评论帖子不足，今天已完成 {len(completed)}/{COMMENT_TARGET}；补跑将继续剩余额度")
 
 
 def main():

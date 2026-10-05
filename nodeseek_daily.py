@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""NodeSeek daily attendance and one random trade comment.
+"""NodeSeek daily attendance and three random trade comments.
 Copyright (c) 2024 Hosea. Licensed under the MIT License.
 """
 import base64
@@ -24,6 +24,8 @@ import secrets
 BASE = "https://www.nodeseek.com"
 LOGIN_URL = BASE + "/signIn.html"
 SITEKEY = "0x4AAAAAAAaNy7leGjewpVyR"
+COMMENT_TARGET = 3
+COMMENT_INTERVAL_SECONDS = 10
 DEFAULT_COMMENTS = [
     "楼主辛苦了，感谢无私分享！",
     "字字珠玑，看完受益匪浅，果断收藏！",
@@ -216,28 +218,46 @@ def attendance(session):
 
 
 def random_comment(session, store, state, today):
+    if state.get("comment_pending_date") == today:
+        raise RuntimeError("今天已有评论提交待确认，为避免重复发送已停止")
+    if state.get("comment_date") == today:
+        return True
     raw = os.getenv("NS_COMMENT_TEXTS", "")
     texts = json.loads(raw) if raw else DEFAULT_COMMENTS
     if not isinstance(texts, list) or not texts or any(
             not isinstance(x, str) or not x.strip() for x in texts):
         raise RuntimeError("NS_COMMENT_TEXTS 必须是非空字符串的 JSON 数组")
+    if state.get("comment_progress_date") != today:
+        state["comment_progress_date"] = today
+        state["commented_post_ids"] = []
+    completed = state["commented_post_ids"]
+    if len(completed) >= COMMENT_TARGET:
+        state["comment_date"] = today
+        store.save(state)
+        return True
     response = session.get(BASE + "/categories/trade", timeout=30)
     if response.status_code != 200:
-        raise RuntimeError("交易列表读取失败，HTTP " + str(response.status_code))
+        raise RuntimeError("交易区列表读取失败，HTTP " + str(response.status_code))
     soup = BeautifulSoup(response.text, "html.parser")
     urls = []
+    seen = set(completed)
     for post in soup.select(".post-list-item"):
-        if post.select_one(".pined") or "只读" in post.get_text():
+        if post.select_one(".pined, .pinned") or "只读" in post.get_text():
             continue
         link = post.select_one(".post-title a")
         if not link or any(word in link.get_text() for word in ["已出", "已收", "不出了", "没有了"]):
             continue
         url = urljoin(BASE, link.get("href", ""))
         if re.fullmatch(re.escape(BASE) + r"/post-\d+-\d+", url):
+            post_id = int(re.search(r"/post-(\d+)-", url).group(1))
+            if post_id in seen:
+                continue
+            seen.add(post_id)
             urls.append(url)
     random.shuffle(urls)
     username = os.environ.get("NS_USERNAME", "")
-    for url in urls[:5]:
+    sent_in_run = 0
+    for url in urls:
         response = session.get(url, timeout=30)
         if response.status_code != 200:
             continue
@@ -250,7 +270,10 @@ def random_comment(session, store, state, today):
         # Use the same endpoint and fields as NodeSeek's own comment editor.
         post_id = int(re.search(r"/post-(\d+)-", url).group(1))
         comment = random.choice(texts)
+        if sent_in_run:
+            time.sleep(COMMENT_INTERVAL_SECONDS)
         state["comment_pending_date"] = today
+        state["comment_pending_post_id"] = post_id
         store.save(state)
         response = session.post(BASE + "/api/content/new-comment",
             json={"content": comment, "mode": "new-comment", "postId": post_id},
@@ -262,12 +285,14 @@ def random_comment(session, store, state, today):
             raise RuntimeError("评论响应无法确认，已停止避免重复发送")
         if not data.get("success"):
             state.pop("comment_pending_date", None)
+            state.pop("comment_pending_post_id", None)
             store.save(state)
             raise RuntimeError("评论提交失败，HTTP " + str(response.status_code))
         redirect = urljoin(BASE, str(data.get("redirect", "")))
         if not re.fullmatch(re.escape(BASE) + rf"/post-{post_id}-\d+", redirect):
             raise RuntimeError("评论已提交，但返回地址异常，已停止避免重复发送")
         # Verify the published author and text before marking the day complete.
+        confirmed = False
         for _ in range(3):
             response = session.get(redirect, timeout=30)
             if response.status_code == 200:
@@ -277,10 +302,24 @@ def random_comment(session, store, state, today):
                     body = item.select_one("article")
                     if author and body and author.get_text(strip=True) == username and body.get_text(strip=True) == comment:
                         print("随机评论已确认：" + redirect + str(data.get("redirectHash", "")) + " 内容：" + comment)
-                        return True
+                        confirmed = True
+                        break
+            if confirmed:
+                break
             time.sleep(2)
-        raise RuntimeError("评论已提交但未能确认，已停止避免重复发送")
-    raise RuntimeError("未找到可评论的交易帖")
+        if not confirmed:
+            raise RuntimeError("评论已提交但未能确认，已停止避免重复发送")
+        completed.append(post_id)
+        sent_in_run += 1
+        state.pop("comment_pending_date", None)
+        state.pop("comment_pending_post_id", None)
+        if len(completed) >= COMMENT_TARGET:
+            state["comment_date"] = today
+        store.save(state)
+        print(f"今天已确认评论 {len(completed)}/{COMMENT_TARGET} 个交易区帖子")
+        if len(completed) >= COMMENT_TARGET:
+            return True
+    raise RuntimeError(f"交易区可评论帖子不足，今天已完成 {len(completed)}/{COMMENT_TARGET}；补跑将继续剩余额度")
 
 
 def main():

@@ -104,7 +104,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(store.load.call_count, 2)
 
     def test_challenge_does_not_trigger_paid_login(self):
-        response = Mock(status_code=403)
+        response = Mock(status_code=403, headers={}, text="")
         with self.assertRaisesRegex(RuntimeError, "HTTP 状态"):
             app.attendance(Mock(post=Mock(return_value=response)))
 
@@ -637,3 +637,47 @@ class FreeFeedTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+class AttendanceForbiddenTests(unittest.TestCase):
+    def response(self, headers, body="", data=None):
+        response = Mock(status_code=403, headers=headers, text=body)
+        response.json.return_value = data
+        return response
+
+    def test_explicit_expired_session_returns_false(self):
+        response = self.response({"Content-Type": "application/json"}, data={"status": 401})
+        self.assertFalse(app.attendance(Mock(post=Mock(return_value=response))))
+
+    def test_challenge_overrides_auth_field(self):
+        response = self.response({"cf-mitigated": "challenge", "Content-Type": "application/json"},
+                                 data={"status": 401})
+        with self.assertRaisesRegex(RuntimeError, "Cloudflare"):
+            app.attendance(Mock(post=Mock(return_value=response)))
+
+    def test_unknown_denial_never_logs_response_secrets(self):
+        for content_type in ("text/html", "application/json", "text/plain"):
+            response = self.response({"Content-Type": content_type}, "private-cookie-value",
+                                     {"message": "private-cookie-value", "status": 403})
+            with self.assertRaises(RuntimeError) as error:
+                app.attendance(Mock(post=Mock(return_value=response)))
+            self.assertNotIn("private-cookie-value", str(error.exception))
+
+    def test_html_challenge_detected_without_header(self):
+        response = self.response({"Content-Type": "text/html"}, "<script src='/cdn-cgi/challenge-platform/test'>")
+        with self.assertRaisesRegex(RuntimeError, "Cloudflare"):
+            app.attendance(Mock(post=Mock(return_value=response)))
+
+    def test_main_does_not_login_on_challenge(self):
+        store = Mock(sha="existing")
+        store.load.return_value = {"cookies": [{"value": "saved"}]}
+        response = self.response({"cf-mitigated": "challenge"})
+        session = Mock(post=Mock(return_value=response))
+        with patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=session), \
+             patch.dict(os.environ, {"NS_COOKIE": ""}), \
+             patch.object(app, "login") as login:
+            with self.assertRaisesRegex(RuntimeError, "Cloudflare"):
+                app.main()
+        login.assert_not_called()
+        store.save.assert_not_called()
+        session.close.assert_called_once()

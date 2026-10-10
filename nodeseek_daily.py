@@ -178,6 +178,32 @@ def attendance(session):
                             timeout=30)
     if response.status_code == 401:
         return False
+    if response.status_code == 403:
+        # Inspect only known fields; never log response bodies or header values.
+        headers = response.headers
+        content_type = str(headers.get("Content-Type", "")).lower()
+        body = response.text.lower()
+        challenged = (str(headers.get("cf-mitigated", "")).lower() == "challenge"
+                      or any(marker in body for marker in
+                             ("cf-chl-", "/cdn-cgi/challenge-platform/", "just a moment")))
+        if challenged:
+            raise RuntimeError("签到 HTTP 状态：403，Cloudflare 验证拦截；未触发付费登录。请检查运行网络并稍后重试")
+        if "application/json" in content_type:
+            try:
+                denied = response.json()
+            except ValueError:
+                denied = None
+            if isinstance(denied, dict) and (
+                    type(denied.get("status")) is int and denied["status"] == 401):
+                print("Cookie 已失效（签到 HTTP 403，服务端明确返回登录状态 401）")
+                return False
+            kind = "JSON"
+        elif "text/html" in content_type:
+            kind = "HTML"
+        else:
+            kind = "其他"
+        raise RuntimeError("签到 HTTP 状态：403，响应类型：" + kind +
+                           "；服务端拒绝访问，未确认 Cookie 失效，未触发付费登录")
     if response.status_code not in (200, 400, 500):
         raise RuntimeError("签到 HTTP 状态：" + str(response.status_code))
     try:

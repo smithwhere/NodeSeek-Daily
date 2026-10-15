@@ -51,6 +51,10 @@ class LoginVerificationRequired(RuntimeError):
     pass
 
 
+class CloudflareChallengeError(RuntimeError):
+    pass
+
+
 class StateStore:
     """Persist only authenticated ciphertext in the public repository."""
     def __init__(self):
@@ -187,7 +191,7 @@ def attendance(session):
                       or any(marker in body for marker in
                              ("cf-chl-", "/cdn-cgi/challenge-platform/", "just a moment")))
         if challenged:
-            raise RuntimeError("签到 HTTP 状态：403，Cloudflare 验证拦截；未触发付费登录。请检查运行网络并稍后重试")
+            raise CloudflareChallengeError("签到 HTTP 状态：403，Cloudflare 验证拦截；未触发付费登录。请检查运行网络并稍后重试")
         if "application/json" in content_type:
             try:
                 denied = response.json()
@@ -218,6 +222,24 @@ def attendance(session):
         print("Cookie 已失效")
         return False
     raise RuntimeError("签到失败（响应状态：" + str(data.get("status", "unknown")) + "）")
+
+
+def attendance_with_recovery(session):
+    # A confirmed challenge is rejected before attendance is processed.
+    # Reuse the session; never retry login, comments, feeds or ambiguous errors.
+    delays = (20, 40)
+    for attempt in range(len(delays) + 1):
+        try:
+            return attendance(session)
+        except CloudflareChallengeError:
+            if attempt == len(delays):
+                raise CloudflareChallengeError(
+                    "签到连续 3 次被 Cloudflare 拦截；已停止，未触发付费登录，"
+                    "评论和投喂未执行。GitHub 托管 Runner 的访问仍被站点拒绝，"
+                    "本次任务未完成") from None
+            delay = delays[attempt]
+            print(f"签到被 Cloudflare 拦截，{delay} 秒后重试签到（最多 3 次请求）；未触发付费登录")
+            time.sleep(delay)
 
 
 def free_like_progress(session):
@@ -497,7 +519,7 @@ def main():
         state.pop("needs_device_verification", None)
     session = cookie_session(state.get("cookies", []), state.get("headers"))
     try:
-        valid = bool(state.get("cookies")) and attendance(session)
+        valid = bool(state.get("cookies")) and attendance_with_recovery(session)
         if not valid:
             if state.get("needs_device_verification"):
                 raise RuntimeError("尚未完成新设备验证，请更新 NS_COOKIE；已跳过付费验证")
@@ -522,7 +544,7 @@ def main():
             session.close()
             session = cookie_session(state["cookies"], state.get("headers"))
             print("新 Cookie 已加密写回并重新读取，使用 Cookie 会话继续")
-            if not attendance(session):
+            if not attendance_with_recovery(session):
                 raise RuntimeError("写回后的 Cookie 无效")
         elif not store.sha or seed_changed:
             store.save(state)

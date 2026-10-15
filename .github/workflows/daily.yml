@@ -3,11 +3,7 @@ name: NodeSeek 自动签到、随机评论和免费投喂
 on:
   workflow_dispatch:
   schedule:
-    - cron: '5 0 * * *' # 北京时间每天 00:05 主触发
-      timezone: Asia/Shanghai
-    - cron: '0 5 * * *' # 北京时间每天 05:00 补跑检查
-      timezone: Asia/Shanghai
-    - cron: '0 10 * * *' # 北京时间每天 10:00 补跑检查
+    - cron: '5 0 * * *' # 北京时间每天 00:05，仅运行一次
       timezone: Asia/Shanghai
 
 permissions:

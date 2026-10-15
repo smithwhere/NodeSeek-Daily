@@ -675,9 +675,80 @@ class AttendanceForbiddenTests(unittest.TestCase):
         with patch.object(app, "StateStore", return_value=store), \
              patch.object(app, "cookie_session", return_value=session), \
              patch.dict(os.environ, {"NS_COOKIE": ""}), \
+             patch.object(app.time, "sleep"), \
              patch.object(app, "login") as login:
             with self.assertRaisesRegex(RuntimeError, "Cloudflare"):
                 app.main()
         login.assert_not_called()
         store.save.assert_not_called()
         session.close.assert_called_once()
+
+
+class AttendanceRecoveryTests(unittest.TestCase):
+    def challenge(self):
+        return Mock(status_code=403, headers={"cf-mitigated": "challenge"},
+                    text="private-response-value")
+
+    def success(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {"success": True}
+        return response
+
+    def test_main_continues_after_temporary_challenge_without_paid_login(self):
+        store = Mock(sha="existing")
+        store.load.return_value = {"cookies": [{"value": "saved"}]}
+        session = Mock()
+        session.post.side_effect = [self.challenge(), self.success()]
+        with patch.dict(os.environ, {"NS_COOKIE": "", "NS_COMMENT": "false", "NS_FEED": "false"}), \
+             patch.object(app, "StateStore", return_value=store), \
+             patch.object(app, "cookie_session", return_value=session), \
+             patch.object(app.time, "sleep"), \
+             patch.object(app, "login") as login:
+            app.main()
+        login.assert_not_called()
+        self.assertEqual(session.post.call_count, 2)
+        session.close.assert_called_once()
+
+    def test_temporary_challenge_recovers_in_same_session(self):
+        session = Mock()
+        session.post.side_effect = [self.challenge(), self.success()]
+        with patch.object(app.time, "sleep") as sleep:
+            self.assertTrue(app.attendance_with_recovery(session))
+        self.assertEqual(session.post.call_count, 2)
+        sleep.assert_called_once_with(20)
+
+    def test_persistent_challenge_stops_after_three_requests(self):
+        session = Mock()
+        session.post.return_value = self.challenge()
+        with patch.object(app.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "Cloudflare") as error:
+                app.attendance_with_recovery(session)
+        self.assertEqual(session.post.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [20, 40])
+        self.assertNotIn("private-response-value", str(error.exception))
+
+    def test_expired_session_is_returned_without_retry(self):
+        session = Mock(post=Mock(return_value=Mock(status_code=401)))
+        with patch.object(app.time, "sleep") as sleep:
+            self.assertFalse(app.attendance_with_recovery(session))
+        session.post.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_unknown_denial_is_not_retried(self):
+        response = Mock(status_code=403, headers={"Content-Type": "application/json"}, text="")
+        response.json.return_value = {"status": 403}
+        session = Mock(post=Mock(return_value=response))
+        with patch.object(app.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "未确认 Cookie 失效"):
+                app.attendance_with_recovery(session)
+        session.post.assert_called_once()
+        sleep.assert_not_called()
+
+    def test_unconfirmed_network_error_is_not_retried(self):
+        session = Mock()
+        session.post.side_effect = TimeoutError()
+        with patch.object(app.time, "sleep") as sleep:
+            with self.assertRaises(TimeoutError):
+                app.attendance_with_recovery(session)
+        session.post.assert_called_once()
+        sleep.assert_not_called()

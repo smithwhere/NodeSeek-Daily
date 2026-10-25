@@ -8,6 +8,7 @@ import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from cryptography.fernet import Fernet
+from nacl.public import PublicKey, SealedBox
 import os
 import random
 import re
@@ -104,6 +105,58 @@ def cookie_session(cookies, headers=None):
 
 def env_bool(name, default=False):
     return os.getenv(name, str(default)).strip().lower() == "true"
+
+
+def sync_cookie_secret(session, store, state):
+    """Export only a verified session, encrypted with GitHub's repository key."""
+    token = os.getenv("NS_COOKIE_WRITE_TOKEN", "").strip()
+    if not token:
+        print("未配置 NS_COOKIE_WRITE_TOKEN，未同步 NS_COOKIE；继续使用加密持久化 Cookie")
+        return
+    repo = os.getenv("GITHUB_REPOSITORY", "")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise RuntimeError("NS_COOKIE 同步缺少有效 GITHUB_REPOSITORY")
+    # CookieJar applies domain, path, secure and expiry rules for the site root.
+    cookie = requests.cookies.get_cookie_header(
+        session.cookies.jar, requests.Request("GET", BASE + "/").prepare())
+    if not cookie:
+        raise RuntimeError("没有可同步到 NS_COOKIE 的有效 Cookie")
+    cookie_hash = hashlib.sha256(cookie.encode()).hexdigest()
+    current_secret_hash = hashlib.sha256(os.getenv("NS_COOKIE", "").strip().encode()).hexdigest()
+    if state.get("cookie_secret_hash") == cookie_hash and current_secret_hash == cookie_hash:
+        return
+    url = "https://api.github.com/repos/" + repo + "/actions/secrets/"
+    headers = {"Authorization": "Bearer " + token,
+               "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    try:
+        response = requests.get(url + "public-key", headers=headers, timeout=30,
+                                allow_redirects=False)
+        if response.status_code != 200:
+            raise RuntimeError("读取 NS_COOKIE 加密公钥失败，HTTP " + str(response.status_code))
+        try:
+            key = response.json()
+            encrypted = SealedBox(PublicKey(base64.b64decode(key["key"], validate=True))).encrypt(
+                cookie.encode())
+            key_id = key["key_id"]
+            if not isinstance(key_id, str) or not key_id:
+                raise ValueError()
+        except (KeyError, TypeError, ValueError):
+            raise RuntimeError("NS_COOKIE 加密公钥格式异常") from None
+        response = requests.put(url + "NS_COOKIE", headers=headers, json={
+            "encrypted_value": base64.b64encode(encrypted).decode(), "key_id": key_id,
+        }, timeout=30, allow_redirects=False)
+        if response.status_code not in (201, 204):
+            raise RuntimeError("更新 NS_COOKIE 失败，HTTP " + str(response.status_code))
+    except requests.RequestException:
+        raise RuntimeError("NS_COOKIE 同步网络请求失败；已保留加密会话，下次运行重试同步") from None
+    # Update both markers only after GitHub accepts the encrypted secret.
+    # Otherwise the next run would treat our own new Secret as a manual seed.
+    state["cookie_secret_hash"] = cookie_hash
+    state["seed_hash"] = cookie_hash
+    state["cookies"] = dump_cookies(session)
+    store.save(state)
+    print("已自动更新仓库 NS_COOKIE（加密上传，未输出 Cookie）")
 
 
 def solve_turnstile():
@@ -538,6 +591,7 @@ def main():
                 raise RuntimeError("写回后的 Cookie 无效")
         elif not store.sha or seed_changed:
             store.save(state)
+        sync_cookie_secret(session, store, state)
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
         if env_bool("NS_COMMENT", True):
             if state.get("comment_pending_date") == today:

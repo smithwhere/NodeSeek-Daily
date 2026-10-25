@@ -24,6 +24,22 @@
 用户名密码登录通过 YesCaptcha Turnstile 服务，可能消耗服务余额。
 密码、API 密钥和 Cookie 不写入代码、日志或公开文件。
 
+## 自动更新 NS_COOKIE
+
+配置一次后，脚本会在签到确认会话有效后，自动获取当前会话的 Cookie 并同步到仓库 Secret `NS_COOKIE`。既支持自动登录取得的新 Cookie，也支持已有有效会话；Cookie 内容没有变化时不重复写入。仍保留 `.state/nodeseek.enc` 中的加密持久化与每日任务进度。
+
+启用步骤：
+1. 在 GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens 创建令牌，仅选择此仓库，Repository permissions 中授予 **Secrets: Read and write**，并设置合适的到期时间。
+2. 将令牌保存为本仓库 Actions Secret **`NS_COOKIE_WRITE_TOKEN`**。不要将令牌写入代码、仓库变量或聊天。令牌到期后需要更新。
+3. 在 Actions 手动 **Run workflow**；出现“已自动更新仓库 NS_COOKIE”表示同步成功。
+
+普通工作流 `GITHUB_TOKEN` 的 `contents: write` 不能更新 Actions Secrets，不能代替此令牌。未配置 `NS_COOKIE_WRITE_TOKEN` 时会明确提示未同步，继续原有加密持久化流程；配置后若公钥获取、加密上传或状态保存失败，任务以失败退出，后续可手动重跑同步，不会把失败标记为成功。
+
+Cookie 使用仓库公钥和 LibSodium sealed box 加密后上传，日志不输出 Cookie 或令牌。仅导出适用于 `https://www.nodeseek.com/` 的 Cookie，自动同步后更新种子指纹，避免下次运行把自动写入的 Secret 误当作手动替换而覆盖会话。
+这项功能不能代替 NodeSeek 的邮箱、短信或 2FA 验证。若站点要求人工验证，仍需在浏览器完成验证并手动更新一次 `NS_COOKIE`；验证未完成或 Cookie 无效时不会覆盖 Secret。
+
+接口及权限依据：[GitHub Actions Secrets API](https://docs.github.com/en/rest/actions/secrets#create-or-update-a-repository-secret)。
+
 ## 评论设置
 
 每天累计评论交易区 3 个不同的帖子，每帖只发一条。随机打乱交易区第一页的候选帖子，跳过置顶、只读、标题标有已出/已收及自己已发帖或评论的帖子，再选足 3 个；可评论帖子不足时保留进度，可手动重新运行继续。

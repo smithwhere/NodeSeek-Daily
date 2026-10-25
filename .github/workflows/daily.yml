@@ -44,6 +44,7 @@ jobs:
           COOKIE_ENCRYPTION_KEY: ${{ secrets.COOKIE_ENCRYPTION_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           NS_COOKIE: ${{ secrets.NS_COOKIE }}
+          NS_COOKIE_WRITE_TOKEN: ${{ secrets.NS_COOKIE_WRITE_TOKEN }}
           NS_COMMENT_TEXTS: ${{ vars.NS_COMMENT_TEXTS }}
           NS_RANDOM: "false"
           NS_COMMENT: "true"

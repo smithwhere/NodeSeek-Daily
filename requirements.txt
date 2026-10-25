@@ -2,3 +2,4 @@ requests>=2.32,<3
 curl_cffi>=0.13,<1
 cryptography>=44,<51
 beautifulsoup4>=4.13,<5
+PyNaCl>=1.5,<2

@@ -18,8 +18,14 @@ class Tests(unittest.TestCase):
             "NS_FEED": "false",
         })
         self.env.start()
+        self.preflight = patch.object(app, "preflight_session", return_value=None)
+        self.preflight.start()
+        self.recovery = patch.object(app, "attendance_with_recovery", side_effect=lambda session: app.attendance(session))
+        self.recovery.start()
 
     def tearDown(self):
+        self.recovery.stop()
+        self.preflight.stop()
         self.env.stop()
 
     def test_encrypted_write_and_read(self):
@@ -100,7 +106,7 @@ class Tests(unittest.TestCase):
              patch.object(app, "login", side_effect=login), \
              patch.object(app, "dump_cookies", return_value=[{"value": "new"}]):
             app.main()
-        self.assertEqual(events, ["cookie:old", "cookie:empty", "login", "write", "cookie:new"])
+        self.assertEqual(events, ["cookie:old", "cookie:empty", "login", "write", "cookie:new", "write"])
         self.assertEqual(store.load.call_count, 2)
 
     def test_challenge_does_not_trigger_paid_login(self):
@@ -128,7 +134,7 @@ class Tests(unittest.TestCase):
         session.post.return_value = response
         with patch.dict(os.environ, {"NS_USERNAME": "test", "NS_PASSWORD": "test"}), \
              patch.object(app, "solve_turnstile", return_value="test-token"):
-            with self.assertRaisesRegex(RuntimeError, "验证新设备"):
+            with self.assertRaisesRegex(RuntimeError, "人工验证"):
                 app.login(session)
 
     def test_known_device_verification_never_retries_paid_login(self):
@@ -384,6 +390,8 @@ class FreeFeedTests(unittest.TestCase):
             patch.object(app.random, "shuffle"),
             patch.object(app.time, "sleep"),
             patch.object(app, "dump_cookies", return_value=[]),
+            patch.object(app, "preflight_session", return_value=None),
+            patch.object(app, "attendance_with_recovery", side_effect=lambda session: app.attendance(session)),
         ]
         self.handles = [p.start() for p in self.patches]
         self.snapshots = []
@@ -676,6 +684,7 @@ class AttendanceForbiddenTests(unittest.TestCase):
              patch.object(app, "cookie_session", return_value=session), \
              patch.dict(os.environ, {"NS_COOKIE": ""}), \
              patch.object(app.time, "sleep"), \
+             patch.object(app, "preflight_session", return_value=None), \
              patch.object(app, "login") as login:
             with self.assertRaisesRegex(RuntimeError, "Cloudflare"):
                 app.main()
@@ -703,6 +712,7 @@ class AttendanceRecoveryTests(unittest.TestCase):
              patch.object(app, "StateStore", return_value=store), \
              patch.object(app, "cookie_session", return_value=session), \
              patch.object(app.time, "sleep"), \
+             patch.object(app, "preflight_session", return_value=None), \
              patch.object(app, "login") as login:
             app.main()
         login.assert_not_called()

@@ -46,6 +46,10 @@ class CloudflareChallengeError(RuntimeError):
     pass
 
 
+class SessionExpiredError(RuntimeError):
+    pass
+
+
 class StateStore:
     """Persist only authenticated ciphertext in the public repository."""
     def __init__(self):
@@ -203,19 +207,37 @@ def login(session):
     if response.status_code != 200:
         raise RuntimeError("登录 HTTP 状态：" + str(response.status_code))
     result = response.json()
-    if not result.get("success"):
-        raise RuntimeError("NodeSeek 登录失败，请检查账号密码或验证服务")
+    if not isinstance(result, dict):
+        raise RuntimeError("NodeSeek 登录响应格式异常")
     redirect = str(result.get("redirect", ""))
-    if redirect.startswith(("/emailSignIn", "/smsSignIn")):
-        raise LoginVerificationRequired("NodeSeek 要求邮箱或短信验证新设备，请先提供已登录的 NS_COOKIE")
-    if result.get("need2FA"):
-        raise RuntimeError("账号需要 2FA 验证，自动登录无法继续")
+    if redirect.startswith(("/emailSignIn", "/smsSignIn")) or result.get("need2FA"):
+        raise LoginVerificationRequired("NodeSeek 要求邮箱、短信或 2FA 人工验证；请在浏览器完成验证并更新 NS_COOKIE")
+    if not result.get("success"):
+        raise RuntimeError("NodeSeek 拒绝账号密码登录；请检查凭证或站点验证状态")
     for header in ("x-security-token", "x-csrf-token"):
         if response.headers.get(header):
             session.headers[header] = response.headers[header]
     if not dump_cookies(session):
         raise RuntimeError("登录响应未返回会话 Cookie，不能视为登录成功")
     print("NodeSeek 登录成功，已取得 Cookie")
+
+
+def preflight_session(session):
+    """Read-only session check; never treats a challenge as an expired cookie."""
+    response = session.get(BASE + "/board", timeout=30)
+    if response.status_code == 401:
+        return False
+    if response.status_code == 403:
+        body = response.text.lower()
+        if (str(response.headers.get("cf-mitigated", "")).lower() == "challenge"
+                or any(x in body for x in ("cf-chl-", "/cdn-cgi/challenge-platform/", "just a moment"))):
+            raise CloudflareChallengeError("会话预检遭 Cloudflare 验证拦截；不能判定 Cookie 失效")
+        raise RuntimeError("会话预检 HTTP 403；不能判定 Cookie 失效")
+    if response.status_code != 200:
+        raise RuntimeError("会话预检 HTTP " + str(response.status_code) + "；未尝试重新登录")
+    # A public page alone cannot prove authentication. Attendance remains the
+    # authoritative session check, so no state changes are made here.
+    return True
 
 
 def attendance(session):
@@ -562,11 +584,15 @@ def main():
         state.pop("needs_device_verification", None)
     session = cookie_session(state.get("cookies", []), state.get("headers"))
     try:
-        valid = bool(state.get("cookies")) and attendance_with_recovery(session)
+        if state.get("cookies"):
+            preflight_session(session)
+            valid = attendance_with_recovery(session)
+        else:
+            valid = False
         if not valid:
             if state.get("needs_device_verification"):
                 raise RuntimeError("尚未完成新设备验证，请更新 NS_COOKIE；已跳过付费验证")
-            print("没有有效 Cookie，使用账号密码和 YesCaptcha 登录")
+            print("签到接口确认 Cookie 无效；尝试账号密码登录（可能触发人工设备验证）")
             session.close()
             session = cookie_session([], state.get("headers"))
             try:

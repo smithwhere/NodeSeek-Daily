@@ -599,8 +599,12 @@ def main():
         today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
         due = password_refresh_due(state, today)
         if state.get("needs_device_verification"):
-            raise RuntimeError("需要人工完成设备验证并更新 NS_COOKIE")
-        if due and not seed_changed:
+            raise RuntimeError("尚未完成新设备验证，请更新 NS_COOKIE；已跳过付费验证")
+        # Legacy sessions have no rotation timestamp. Verify their existing
+        # Cookie first rather than forcing a password login on migration.
+        if due and not seed_changed and (
+            state.get("last_password_login_date") or not state.get("cookies")
+        ):
             print("已到十天轮换周期，准备刷新会话")
             valid = False
         elif state.get("cookies"):

@@ -565,6 +565,18 @@ def random_comment(session, store, state, today):
     raise RuntimeError(f"交易区可评论帖子不足，今天已完成 {len(completed) + legacy_count}/{COMMENT_TARGET}；补跑将继续剩余额度")
 
 
+def password_refresh_due(state, today):
+    from datetime import date
+    last = state.get("last_password_login_date")
+    if not last:
+        return True
+    try:
+        days = (date.fromisoformat(today) - date.fromisoformat(last)).days
+    except (ValueError, TypeError):
+        return True
+    return days < 0 or days >= 10
+
+
 def main():
     store = StateStore()
     state = store.load()
@@ -584,7 +596,14 @@ def main():
         state.pop("needs_device_verification", None)
     session = cookie_session(state.get("cookies", []), state.get("headers"))
     try:
-        if state.get("cookies"):
+        today = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        due = password_refresh_due(state, today)
+        if state.get("needs_device_verification"):
+            raise RuntimeError("需要人工完成设备验证并更新 NS_COOKIE")
+        if due and not seed_changed:
+            print("已到十天轮换周期，准备刷新会话")
+            valid = False
+        elif state.get("cookies"):
             preflight_session(session)
             valid = attendance_with_recovery(session)
         else:
@@ -615,6 +634,8 @@ def main():
             print("新 Cookie 已加密写回并重新读取，使用 Cookie 会话继续")
             if not attendance_with_recovery(session):
                 raise RuntimeError("写回后的 Cookie 无效")
+            state["last_password_login_date"] = today
+            store.save(state)
         elif not store.sha or seed_changed:
             store.save(state)
         sync_cookie_secret(session, store, state)

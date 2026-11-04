@@ -106,7 +106,7 @@ class Tests(unittest.TestCase):
              patch.object(app, "login", side_effect=login), \
              patch.object(app, "dump_cookies", return_value=[{"value": "new"}]):
             app.main()
-        self.assertEqual(events, ["cookie:old", "cookie:empty", "login", "write", "cookie:new"])
+        self.assertEqual(events, ["cookie:old", "cookie:empty", "login", "write", "cookie:new", "write"])
         self.assertEqual(store.load.call_count, 2)
 
     def test_challenge_does_not_trigger_paid_login(self):
@@ -712,6 +712,7 @@ class AttendanceRecoveryTests(unittest.TestCase):
              patch.object(app, "StateStore", return_value=store), \
              patch.object(app, "cookie_session", return_value=session), \
              patch.object(app.time, "sleep"), \
+             patch.object(app, "preflight_session", return_value=None), \
              patch.object(app, "login") as login:
             app.main()
         login.assert_not_called()

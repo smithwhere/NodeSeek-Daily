@@ -45,7 +45,8 @@ class CookieSecretTests(unittest.TestCase):
 
     def run_main(self, attendance=True, login=None, put_status=204):
         output = io.StringIO()
-        with patch.object(app, "StateStore", return_value=self.store), \
+        with patch.object(app, "preflight_session", return_value=None), \
+             patch.object(app, "StateStore", return_value=self.store), \
              patch.object(app, "attendance_with_recovery", side_effect=attendance
                           if isinstance(attendance, list) else None,
                           return_value=attendance), \
